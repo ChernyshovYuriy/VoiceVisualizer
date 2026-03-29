@@ -1,0 +1,356 @@
+"""
+main_window.py
+PySide6 main window.
+Left panel : file controls + seek bar.
+Right panel: Three.js 3D surface in QWebEngineView (or browser fallback).
+"""
+
+from __future__ import annotations
+import webbrowser
+from pathlib import Path
+
+from PySide6.QtCore import Qt, QTimer, Signal, QObject, QUrl, QThread
+from PySide6.QtWidgets import (
+    QFileDialog, QHBoxLayout, QLabel, QMainWindow, QPushButton,
+    QSlider, QVBoxLayout, QWidget, QMessageBox,
+)
+
+# Optional WebEngine — fall back to system browser if not installed
+try:
+    from PySide6.QtWebEngineWidgets import QWebEngineView
+    from PySide6.QtWebEngineCore import QWebEngineSettings
+    HAS_WEBENGINE = True
+except ImportError:
+    HAS_WEBENGINE = False
+
+from core.player import Player, PreparedSource, AUDIO_EXT, VIDEO_EXT
+from core.buffer import RollingBuffer
+from core.analyzer import Analyzer, FrameInfo
+from core.live_state import LiveState
+from core.ws_server import WSServer
+
+_ACCEPT = " ".join(f"*{e}" for e in sorted(AUDIO_EXT | VIDEO_EXT))
+_FILTER = f"Audio / Video ({_ACCEPT})"
+_HTML = Path(__file__).parent.parent / "frontend" / "visualizer.html"
+
+
+def _fmt(s: float) -> str:
+    m, sec = divmod(int(s), 60)
+    return f"{m}:{sec:02d}"
+
+
+class _Bridge(QObject):
+    frame_ready = Signal(object)
+
+
+class _LoadWorker(QObject):
+    loaded = Signal(object)
+    failed = Signal(str)
+    finished = Signal()
+
+    def __init__(self, path: Path) -> None:
+        super().__init__()
+        self._path = path
+
+    def run(self) -> None:
+        try:
+            prepared = Player.prepare_source(self._path)
+            self.loaded.emit(prepared)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+        finally:
+            self.finished.emit()
+
+
+APP_STYLE = """
+QMainWindow, QWidget {
+    background-color: #0d1117;
+    color: #e6edf3;
+    font-family: 'Segoe UI', 'SF Pro Text', 'Helvetica Neue', sans-serif;
+    font-size: 13px;
+}
+QPushButton {
+    background-color: #21262d;
+    color: #e6edf3;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    padding: 6px 16px;
+    font-size: 13px;
+}
+QPushButton:hover    { background-color: #30363d; border-color: #58a6ff; }
+QPushButton:pressed  { background-color: #161b22; }
+QPushButton:disabled { color: #484f58; border-color: #21262d; }
+QLabel  { color: #e6edf3; background: transparent; }
+QSlider::groove:horizontal {
+    background: #21262d; height: 4px; border-radius: 2px;
+}
+QSlider::sub-page:horizontal {
+    background: #58a6ff; border-radius: 2px;
+}
+QSlider::handle:horizontal {
+    background: #58a6ff; width: 14px; height: 14px;
+    margin: -5px 0; border-radius: 7px; border: 2px solid #0d1117;
+}
+QSlider::handle:horizontal:hover { background: #79c0ff; }
+QSplitter::handle { background: #21262d; }
+"""
+
+DIALOG_STYLE = """
+QFileDialog, QFileDialog * { background-color: #161b22; color: #e6edf3; font-size: 13px; }
+QFileDialog QListView, QFileDialog QTreeView {
+    background-color: #21262d; color: #e6edf3;
+    border: 1px solid #30363d; border-radius: 4px;
+}
+QFileDialog QListView::item:selected,
+QFileDialog QTreeView::item:selected { background: #1f6feb; color: #fff; }
+QFileDialog QLineEdit {
+    background: #21262d; color: #e6edf3; border: 1px solid #30363d;
+    border-radius: 4px; padding: 4px 8px;
+}
+QPushButton { background: #21262d; color: #e6edf3; border: 1px solid #30363d;
+              border-radius: 6px; padding: 5px 14px; }
+QPushButton:hover { background: #30363d; }
+QComboBox { background: #21262d; color: #e6edf3; border: 1px solid #30363d;
+            border-radius: 4px; padding: 3px 8px; }
+QLabel { color: #e6edf3; background: transparent; }
+QHeaderView::section { background: #161b22; color: #768390; border: none; padding: 4px; }
+QScrollBar:vertical   { background: #161b22; width: 8px; border: none; }
+QScrollBar::handle:vertical { background: #30363d; border-radius: 4px; min-height: 20px; }
+"""
+
+
+class MainWindow(QMainWindow):
+    def __init__(self) -> None:
+        super().__init__()
+        self.setWindowTitle("Voice / Music Visualizer — 3D Live")
+        self.resize(1280, 760)
+        self.setStyleSheet(APP_STYLE)
+
+        # ── core objects ──────────────────────────────────────────────────────
+        self._live = LiveState()
+        self._buffer = RollingBuffer()
+        self._bridge = _Bridge()
+        self._analyzer = Analyzer(self._buffer, self._bridge.frame_ready.emit)
+        self._player = Player(on_chunk=self._analyzer.push_chunk)
+        self._slider_dragging = False
+        self._load_thread: QThread | None = None
+        self._load_worker: _LoadWorker | None = None
+        self._pending_path: Path | None = None
+
+        # Start WS server (feeds Three.js frontend)
+        try:
+            self._ws = WSServer(self._live)
+            self._ws.start()
+        except RuntimeError as e:
+            QMessageBox.warning(self, "WS server", str(e))
+
+        self._bridge.frame_ready.connect(self._on_frame)
+        self._build_ui()
+
+        self._tick = QTimer(self)
+        self._tick.setInterval(100)
+        self._tick.timeout.connect(self._tick_cb)
+        self._tick.start()
+
+    # ── UI ────────────────────────────────────────────────────────────────────
+
+    def _build_ui(self) -> None:
+        root = QWidget()
+        self.setCentralWidget(root)
+        vbox = QVBoxLayout(root)
+        vbox.setContentsMargins(10, 10, 10, 8)
+        vbox.setSpacing(8)
+
+        # ── toolbar ───────────────────────────────────────────────────────────
+        tb = QHBoxLayout()
+        tb.setSpacing(8)
+
+        self._btn_open = QPushButton("📂  Open file…")
+        self._btn_open.setFixedHeight(34)
+        self._btn_open.clicked.connect(self._open_file)
+
+        self._btn_play = QPushButton("▶  Play")
+        self._btn_play.setFixedWidth(100)
+        self._btn_play.setFixedHeight(34)
+        self._btn_play.setEnabled(False)
+        self._btn_play.clicked.connect(self._toggle_play)
+
+        self._lbl_file = QLabel("No file loaded")
+        self._lbl_file.setStyleSheet("color: #545d68; font-size: 12px;")
+
+        tb.addWidget(self._btn_open)
+        tb.addWidget(self._btn_play)
+        tb.addSpacing(6)
+        tb.addWidget(self._lbl_file)
+        tb.addStretch()
+
+        if not HAS_WEBENGINE:
+            note = QLabel("⚠ PySide6-WebEngine not found — opens in browser")
+            note.setStyleSheet("color: #d29922; font-size: 11px;")
+            tb.addWidget(note)
+
+        vbox.addLayout(tb)
+
+        sep = QWidget(); sep.setFixedHeight(1)
+        sep.setStyleSheet("background:#21262d;")
+        vbox.addWidget(sep)
+
+        if HAS_WEBENGINE:
+            self._view = QWebEngineView()
+            self._view.setStyleSheet("background:#000;")
+            page = self._view.page()
+            settings = page.settings()
+            settings.setAttribute(
+                QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True)
+            settings.setAttribute(
+                QWebEngineSettings.WebAttribute.JavascriptEnabled, True)
+            self._view.load(QUrl.fromLocalFile(str(_HTML.resolve())))
+            vbox.addWidget(self._view, stretch=1)
+        else:
+            placeholder = QLabel(
+                "3D visualizer opens in your browser.\n"
+                "Install PySide6-WebEngine to embed it here:\n"
+                "  pip install PySide6-WebEngine"
+            )
+            placeholder.setAlignment(Qt.AlignCenter)
+            placeholder.setStyleSheet(
+                "color:#545d68; font-size:14px; "
+                "background:#0d1117; border:1px solid #21262d; border-radius:8px;"
+            )
+            vbox.addWidget(placeholder, stretch=1)
+            QTimer.singleShot(800, self._open_browser)
+
+        sep2 = QWidget(); sep2.setFixedHeight(1)
+        sep2.setStyleSheet("background:#21262d;")
+        vbox.addWidget(sep2)
+
+        sb = QHBoxLayout()
+        sb.setSpacing(8)
+
+        self._lbl_cur = QLabel("0:00")
+        self._lbl_cur.setStyleSheet("color:#545d68; font-size:12px; min-width:34px;")
+
+        self._slider = QSlider(Qt.Horizontal)
+        self._slider.setRange(0, 1000)
+        self._slider.sliderPressed.connect(
+            lambda: setattr(self, "_slider_dragging", True))
+        self._slider.sliderReleased.connect(self._on_seek)
+        self._slider.sliderMoved.connect(self._on_slider_moved)
+
+        self._lbl_dur = QLabel("0:00")
+        self._lbl_dur.setStyleSheet("color:#545d68; font-size:12px; min-width:34px;")
+
+        sb.addWidget(self._lbl_cur)
+        sb.addWidget(self._slider)
+        sb.addWidget(self._lbl_dur)
+        vbox.addLayout(sb)
+
+    # ── slots ─────────────────────────────────────────────────────────────────
+
+    def _open_file(self) -> None:
+        if self._load_thread is not None:
+            return
+
+        dlg = QFileDialog(self, "Open audio or video file")
+        dlg.setFileMode(QFileDialog.ExistingFile)
+        dlg.setNameFilter(_FILTER)
+        dlg.setOption(QFileDialog.DontUseNativeDialog, True)
+        dlg.setStyleSheet(DIALOG_STYLE)
+        if dlg.exec() != QFileDialog.Accepted:
+            return
+        sel = dlg.selectedFiles()
+        if not sel:
+            return
+
+        p = Path(sel[0])
+        self._player.stop()
+        self._buffer.reset()
+        self._btn_play.setText("▶  Play")
+        self._btn_play.setEnabled(False)
+        self._slider.setValue(0)
+        self._lbl_cur.setText("0:00")
+        self._lbl_dur.setText("0:00")
+        self._pending_path = p
+        self._lbl_file.setText(f"Preparing {p.name} …")
+        self._lbl_file.setStyleSheet("color:#58a6ff; font-size:12px;")
+        self._btn_open.setEnabled(False)
+
+        self._load_thread = QThread(self)
+        self._load_worker = _LoadWorker(p)
+        self._load_worker.moveToThread(self._load_thread)
+        self._load_thread.started.connect(self._load_worker.run)
+        self._load_worker.loaded.connect(self._on_loaded)
+        self._load_worker.failed.connect(self._on_load_failed)
+        self._load_worker.finished.connect(self._load_thread.quit)
+        self._load_worker.finished.connect(self._load_worker.deleteLater)
+        self._load_thread.finished.connect(self._on_load_thread_finished)
+        self._load_thread.finished.connect(self._load_thread.deleteLater)
+        self._load_thread.start()
+
+    def _on_loaded(self, prepared: PreparedSource) -> None:
+        assert self._pending_path is not None
+        dur = self._player.load_prepared(prepared)
+        self._lbl_file.setText(f"{self._pending_path.name}  ·  {_fmt(dur)}")
+        self._lbl_file.setStyleSheet("color:#adbac7; font-size:12px;")
+        self._lbl_dur.setText(_fmt(dur))
+        self._btn_play.setEnabled(True)
+
+    def _on_load_failed(self, message: str) -> None:
+        self._lbl_file.setText("Load failed")
+        self._lbl_file.setStyleSheet("color:#f85149; font-size:12px;")
+        QMessageBox.critical(self, "Load error", message)
+
+    def _on_load_thread_finished(self) -> None:
+        self._btn_open.setEnabled(True)
+        self._load_thread = None
+        self._load_worker = None
+        self._pending_path = None
+
+    def _toggle_play(self) -> None:
+        if self._player.is_playing:
+            self._player.pause()
+            self._btn_play.setText("▶  Play")
+        else:
+            self._player.play(on_end=lambda: self._btn_play.setText("▶  Play"))
+            self._btn_play.setText("⏸  Pause")
+
+    def _on_frame(self, info: object) -> None:
+        mel_latest = self._buffer.snapshot()[0][-1]
+        self._live.update(
+            mel=mel_latest,
+            pitch=getattr(info, "pitch_hz"),
+            loudness=getattr(info, "loudness_db"),
+            note=getattr(info, "note_name"),
+            timbre=getattr(info, "timbre"),
+            vocal_range=getattr(info, "vocal_range"),
+        )
+
+    def _on_slider_moved(self, v: int) -> None:
+        dur = self._player.duration
+        if dur > 0:
+            self._lbl_cur.setText(_fmt(v / 1000 * dur))
+
+    def _on_seek(self) -> None:
+        self._slider_dragging = False
+        dur = self._player.duration
+        if dur > 0:
+            self._player.seek(self._slider.value() / 1000 * dur)
+
+    def _tick_cb(self) -> None:
+        dur = self._player.duration
+        cur = self._player.current_time
+        if dur > 0 and not self._slider_dragging:
+            self._slider.blockSignals(True)
+            self._slider.setValue(int(cur / dur * 1000))
+            self._slider.blockSignals(False)
+            self._lbl_cur.setText(_fmt(cur))
+
+    def _open_browser(self) -> None:
+        webbrowser.open(_HTML.resolve().as_uri())
+
+    def closeEvent(self, event) -> None:
+        self._player.stop()
+        if self._load_thread is not None:
+            self._load_thread.quit()
+            self._load_thread.wait(2000)
+        super().closeEvent(event)

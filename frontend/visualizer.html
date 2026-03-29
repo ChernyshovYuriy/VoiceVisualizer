@@ -1,0 +1,561 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+html, body { width:100%; height:100%; overflow:hidden; background:#07111b; }
+#c { display:block; }
+
+#info {
+  position:absolute; top:16px; right:16px;
+  background:rgba(10,18,34,0.68);
+  border:1px solid rgba(116,205,255,0.22);
+  border-radius:16px; padding:18px 22px 18px 18px;
+  font-family:'Segoe UI','SF Pro Text',sans-serif;
+  min-width:218px; pointer-events:none;
+  backdrop-filter:blur(14px);
+  box-shadow:0 18px 56px rgba(0,0,0,.28), inset 0 1px 0 rgba(255,255,255,.03);
+}
+#info table { border-collapse:collapse; width:100%; }
+#info td { padding:5px 0; }
+.lbl { color:rgba(177,208,238,0.72); font-size:12px; padding-right:18px; white-space:nowrap; }
+.val { color:#eef6ff; font-size:15px; font-weight:600; text-shadow:0 0 10px rgba(115,195,255,.08); }
+.val.big { font-size:28px; font-weight:700; color:#f4fbff; letter-spacing:-0.4px; text-shadow:0 0 18px rgba(150,235,255,.10); }
+
+.ax {
+  position:absolute;
+  color:rgba(170,206,244,0.56);
+  font-family:'Segoe UI',sans-serif;
+  font-size:11px; letter-spacing:.6px;
+  pointer-events:none;
+}
+#ax-left   { bottom:14px; left:43%; }
+#ax-right  { bottom:14px; right:8.8%; }
+#ax-depth  { right:9px; top:48%; transform:rotate(90deg); }
+#ax-note   { bottom:37%; left:10px; }
+#tag       { top:18px; left:18px; border:1px solid rgba(116,205,255,0.20); border-radius:16px; padding:14px 18px; background:rgba(10,18,34,0.50); backdrop-filter:blur(12px); box-shadow:0 12px 34px rgba(0,0,0,.22); }
+#tag .line { color:rgba(228,239,255,0.82); font-family:'Segoe UI',sans-serif; font-size:12px; line-height:1.55; letter-spacing:.2px; }
+#tag b { color:#ffd88c; font-weight:700; }
+#dot { position:absolute; top:12px; left:12px; width:8px; height:8px; border-radius:50%; background:#2b3645; transition:background .4s ease, box-shadow .4s ease; }
+#dot.on { background:#3fb950; box-shadow:0 0 10px rgba(63,185,80,.55); }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<div id="info">
+  <table>
+    <tr><td class="lbl">Note</td>  <td class="val big" id="v-note">—</td></tr>
+    <tr><td class="lbl">Freq</td>  <td class="val"     id="v-freq">— Hz</td></tr>
+    <tr><td class="lbl">Volume</td><td class="val"     id="v-vol">— dB</td></tr>
+    <tr><td class="lbl">Timbre</td><td class="val"     id="v-timbre">—</td></tr>
+    <tr><td class="lbl">Range</td> <td class="val"     id="v-range">—</td></tr>
+  </table>
+</div>
+
+<div class="ax" id="ax-note">← Lower pitch / darker body</div>
+<div class="ax" id="ax-left">Pitch field →</div>
+<div class="ax" id="ax-right">← Brighter / richer →</div>
+<div class="ax" id="ax-depth">Brightness / resonance</div>
+<div id="tag">
+  <div class="line"><b>Resonance ocean:</b> fixed acoustic field</div>
+  <div class="line"><b>Living swells:</b> pitch and loudness shape the sea</div>
+  <div class="line"><b>Gold mist:</b> crest sparkles ride the peaks</div>
+</div>
+<div id="dot"></div>
+
+<script src="https://unpkg.com/three@0.128.0/build/three.min.js"></script>
+<script src="https://unpkg.com/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<script src="https://unpkg.com/three@0.128.0/examples/js/shaders/CopyShader.js"></script>
+<script src="https://unpkg.com/three@0.128.0/examples/js/shaders/LuminosityHighPassShader.js"></script>
+<script src="https://unpkg.com/three@0.128.0/examples/js/postprocessing/EffectComposer.js"></script>
+<script src="https://unpkg.com/three@0.128.0/examples/js/postprocessing/RenderPass.js"></script>
+<script src="https://unpkg.com/three@0.128.0/examples/js/postprocessing/ShaderPass.js"></script>
+<script src="https://unpkg.com/three@0.128.0/examples/js/postprocessing/UnrealBloomPass.js"></script>
+
+<script>
+const NX = 112;
+const NZ = 76;
+const W = 5.0;
+const D = 3.6;
+const H = 1.35;
+const FIELD_SIZE = NX * NZ;
+
+const field = new Float32Array(FIELD_SIZE);
+const velocity = new Float32Array(FIELD_SIZE);
+const crestMask = new Float32Array(FIELD_SIZE);
+const scratch = new Float32Array(FIELD_SIZE);
+const scratch2 = new Float32Array(FIELD_SIZE);
+
+let audioState = {
+  mel: new Float32Array(64),
+  pitch: 0,
+  centroid: 900,
+  loudness: -80,
+  note: '—',
+  timbre: '—',
+  range: '—',
+};
+let smoothedPitch = 220;
+let smoothedCentroid = 900;
+let smoothedLoudness = -80;
+let attackEnergy = 0;
+let ambientPhase = 0;
+let wsReady = false;
+let pendingImpulse = false;
+
+function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+function lerp(a,b,t){ return a + (b-a)*t; }
+function smoothstep(a,b,x){ const t = clamp((x-a)/(b-a), 0, 1); return t*t*(3-2*t); }
+function idx(x,z){ return z * NX + x; }
+
+function hsl2rgb(h, s, l) {
+  h = ((h % 360) + 360) % 360;
+  const a = s * Math.min(l, 1 - l);
+  const f = n => {
+    const k = (n + h / 30) % 12;
+    return l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1));
+  };
+  return [f(0), f(8), f(4)];
+}
+
+function mapLogFreqToUnit(hz) {
+  const f = clamp(hz || 220, 80, 1500);
+  const lo = Math.log(80), hi = Math.log(1500);
+  return clamp((Math.log(f) - lo) / (hi - lo), 0, 1);
+}
+
+function ingestAudioFrame(d) {
+  const mel = new Float32Array(64);
+  let energy = 0, weighted = 0, weighted2 = 0, peak = 0;
+  for (let i = 0; i < 64; i++) {
+    const v = clamp((d.mel && d.mel[i]) || 0, 0, 1);
+    mel[i] = v;
+    energy += v;
+    weighted += v * i;
+    weighted2 += v * i * i;
+    peak = Math.max(peak, v);
+  }
+  const prevEnergy = audioState.mel.reduce((s, v) => s + v, 0);
+  attackEnergy = lerp(attackEnergy, Math.max(0, energy - prevEnergy) * 0.65 + peak * 0.18, 0.42);
+
+  const centroidBin = energy > 1e-5 ? weighted / energy : 20;
+  const variance = energy > 1e-5 ? Math.max(0, weighted2 / energy - centroidBin * centroidBin) : 36;
+  const spread = Math.sqrt(variance) / 18.0;
+
+  audioState = {
+    mel,
+    pitch: d.pitch || 0,
+    centroid: d.centroid || (80 * Math.pow(4000 / 80, centroidBin / 63)),
+    loudness: d.loudness ?? -80,
+    note: d.note || '—',
+    timbre: d.timbre || '—',
+    range: d.range || '—',
+    centroidBin,
+    spread: clamp(spread, 0.15, 1.5),
+    meanEnergy: energy / 64,
+    peak,
+  };
+
+  const targetPitch = audioState.pitch > 40 ? audioState.pitch : audioState.centroid;
+  smoothedPitch = lerp(smoothedPitch, targetPitch, 0.18);
+  smoothedCentroid = lerp(smoothedCentroid, audioState.centroid, 0.12);
+  smoothedLoudness = lerp(smoothedLoudness, audioState.loudness, 0.15);
+}
+
+const canvas = document.getElementById('c');
+const renderer = new THREE.WebGLRenderer({canvas, antialias:true, powerPreference:'high-performance'});
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 0.86;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x07111c);
+scene.fog = new THREE.FogExp2(0x07111c, 0.042);
+
+const camera = new THREE.PerspectiveCamera(37, 1, 0.1, 100);
+camera.position.set(2.55, 1.82, 4.35);
+
+const controls = new THREE.OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 0.34, 0.16);
+controls.enableDamping = true;
+controls.dampingFactor = 0.05;
+controls.enablePan = false;
+controls.minDistance = 2.2;
+controls.maxDistance = 8;
+controls.maxPolarAngle = Math.PI * 0.47;
+controls.minPolarAngle = Math.PI * 0.18;
+controls.update();
+
+const composer = new THREE.EffectComposer(renderer);
+composer.addPass(new THREE.RenderPass(scene, camera));
+const bloomPass = new THREE.UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.36, 0.78, 0.82);
+composer.addPass(bloomPass);
+
+scene.add(new THREE.AmbientLight(0x89bfff, 0.34));
+scene.add(new THREE.HemisphereLight(0x78cfff, 0x07111c, 0.20));
+const rim = new THREE.PointLight(0x67d8ff, 0.72, 8.5, 1.9); rim.position.set(-1.7, 2.5, 2.8); scene.add(rim);
+const warm = new THREE.PointLight(0xffd28a, 0.46, 7.2, 2.1); warm.position.set(2.4, 1.7, -1.2); scene.add(warm);
+
+const floorGeo = new THREE.PlaneGeometry(W + 1.65, D + 1.55);
+floorGeo.rotateX(-Math.PI / 2);
+const floorMat = new THREE.MeshBasicMaterial({
+  color:0x081722, transparent:true, opacity:0.72, side:THREE.DoubleSide, depthWrite:false
+});
+const floorMesh = new THREE.Mesh(floorGeo, floorMat);
+floorMesh.position.y = -0.06;
+scene.add(floorMesh);
+
+(function addGrid() {
+  const pts = [];
+  const sX = 15, sZ = 11;
+  const hw = (W + 1.65) / 2, hd = (D + 1.55) / 2, y = -0.058;
+  for (let i = 0; i <= sX; i++) {
+    const x = -hw + i * (W + 1.65) / sX;
+    pts.push(x, y, -hd, x, y, hd);
+  }
+  for (let j = 0; j <= sZ; j++) {
+    const z = -hd + j * (D + 1.55) / sZ;
+    pts.push(-hw, y, z, hw, y, z);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(pts), 3));
+  scene.add(new THREE.LineSegments(g, new THREE.LineBasicMaterial({color:0x1d4762, transparent:true, opacity:0.42})));
+})();
+
+const planeGeo = new THREE.PlaneGeometry(W, D, NX - 1, NZ - 1);
+planeGeo.rotateX(-Math.PI / 2);
+const bodyPos = planeGeo.attributes.position.array;
+const bodyCol = new Float32Array(bodyPos.length);
+planeGeo.setAttribute('color', new THREE.BufferAttribute(bodyCol, 3));
+
+const bodyMat = new THREE.MeshBasicMaterial({
+  vertexColors:true,
+  transparent:true,
+  opacity:0.78,
+  side:THREE.DoubleSide,
+  depthWrite:false,
+});
+const bodyMesh = new THREE.Mesh(planeGeo, bodyMat);
+bodyMesh.position.y = 0.0;
+scene.add(bodyMesh);
+
+const crestGeo = planeGeo.clone();
+const crestPos = crestGeo.attributes.position.array;
+const crestCol = new Float32Array(crestPos.length);
+crestGeo.setAttribute('color', new THREE.BufferAttribute(crestCol, 3));
+const crestMat = new THREE.MeshBasicMaterial({
+  vertexColors:true,
+  transparent:true,
+  opacity:0.26,
+  side:THREE.DoubleSide,
+  blending:THREE.AdditiveBlending,
+  depthWrite:false,
+});
+const crestMesh = new THREE.Mesh(crestGeo, crestMat);
+crestMesh.position.y = 0.016;
+scene.add(crestMesh);
+
+const reflGeo = planeGeo.clone();
+const reflPos = reflGeo.attributes.position.array;
+const reflCol = new Float32Array(reflPos.length);
+reflGeo.setAttribute('color', new THREE.BufferAttribute(reflCol, 3));
+const reflMat = new THREE.MeshBasicMaterial({
+  vertexColors:true,
+  transparent:true,
+  opacity:0.10,
+  side:THREE.DoubleSide,
+  blending:THREE.AdditiveBlending,
+  depthWrite:false,
+});
+const reflMesh = new THREE.Mesh(reflGeo, reflMat);
+reflMesh.scale.y = -1;
+reflMesh.position.y = -0.108;
+scene.add(reflMesh);
+
+const mistCount = 320;
+const mistPos = new Float32Array(mistCount * 3);
+const mistCol = new Float32Array(mistCount * 3);
+const mistLife = new Float32Array(mistCount);
+const mistVel = new Float32Array(mistCount * 3);
+for (let i = 0; i < mistCount; i++) mistLife[i] = 0;
+const mistGeo = new THREE.BufferGeometry();
+mistGeo.setAttribute('position', new THREE.BufferAttribute(mistPos, 3));
+mistGeo.setAttribute('color', new THREE.BufferAttribute(mistCol, 3));
+const mist = new THREE.Points(mistGeo, new THREE.PointsMaterial({
+  size:0.046, vertexColors:true, transparent:true, opacity:0.34,
+  blending:THREE.AdditiveBlending, depthWrite:false, sizeAttenuation:true
+}));
+scene.add(mist);
+
+function spawnMist(xNorm, zNorm, amount, hue) {
+  if (amount < 0.06) return;
+  const count = Math.min(mistCount, 10 + Math.floor(amount * 70));
+  const x0 = (xNorm - 0.5) * W;
+  const z0 = (zNorm - 0.5) * D;
+  for (let n = 0; n < count; n++) {
+    let i = Math.floor(Math.random() * mistCount);
+    const base = i * 3;
+    mistPos[base + 0] = x0 + (Math.random() - 0.5) * 0.42;
+    mistPos[base + 1] = 0.36 + Math.random() * 0.26;
+    mistPos[base + 2] = z0 + (Math.random() - 0.5) * 0.26;
+    mistVel[base + 0] = (Math.random() - 0.5) * 0.005;
+    mistVel[base + 1] = 0.006 + Math.random() * 0.009;
+    mistVel[base + 2] = (Math.random() - 0.5) * 0.003;
+    mistLife[i] = 0.6 + Math.random() * 0.8 + amount * 0.6;
+    const hero = Math.random() < 0.14;
+    const [r,g,b] = hero
+      ? hsl2rgb(hue + 14 + (Math.random() - 0.5) * 8, 0.88, 0.72)
+      : hsl2rgb(hue + (Math.random() - 0.5) * 14, 0.82, 0.66);
+    mistCol[base+0] = r; mistCol[base+1] = g; mistCol[base+2] = b;
+  }
+}
+
+function injectImpulse() {
+  const pitchNorm = mapLogFreqToUnit(smoothedPitch);
+  const brightNorm = clamp((Math.log(clamp(smoothedCentroid, 120, 4000)) - Math.log(120)) / (Math.log(4000) - Math.log(120)), 0, 1);
+  const loud = clamp((smoothedLoudness + 58) / 34, 0, 1);
+  const spread = clamp(audioState.spread || 0.45, 0.18, 1.35);
+  const strength = 0.006 + loud * 0.018 + (audioState.peak || 0) * 0.006;
+
+  const xCenter = pitchNorm * (NX - 1);
+  const zCenter = lerp(0.22, 0.82, brightNorm) * (NZ - 1);
+  const sigmaX = lerp(4.8, 10.0, spread * 0.55 + loud * 0.45);
+  const sigmaZ = lerp(3.5, 7.4, spread * 0.8 + brightNorm * 0.2);
+
+  const lobes = [
+    {dx:0, dz:0, amp:1.0},
+    {dx:-sigmaX * 0.9, dz: sigmaZ * 0.42, amp:0.36},
+    {dx: sigmaX * 0.85, dz:-sigmaZ * 0.38, amp:0.28},
+  ];
+
+  for (const lobe of lobes) {
+    const xc = xCenter + lobe.dx;
+    const zc = zCenter + lobe.dz;
+    const x0 = Math.max(1, Math.floor(xc - sigmaX * 2.8));
+    const x1 = Math.min(NX - 2, Math.ceil(xc + sigmaX * 2.8));
+    const z0 = Math.max(1, Math.floor(zc - sigmaZ * 2.6));
+    const z1 = Math.min(NZ - 2, Math.ceil(zc + sigmaZ * 2.6));
+    for (let z = z0; z <= z1; z++) {
+      const dz = (z - zc) / sigmaZ;
+      const dz2 = dz * dz;
+      for (let x = x0; x <= x1; x++) {
+        const dx = (x - xc) / sigmaX;
+        const g = Math.exp(-(dx * dx + dz2) * 0.5);
+        const i = idx(x,z);
+        field[i] += strength * lobe.amp * g;
+        velocity[i] += (0.0008 + attackEnergy * 0.0024) * lobe.amp * g;
+      }
+    }
+  }
+
+  if (attackEnergy > 0.09) {
+    const crestHue = lerp(176, 56, brightNorm * 0.65 + loud * 0.35);
+    spawnMist(pitchNorm, lerp(0.28, 0.8, brightNorm), attackEnergy * 0.7, crestHue);
+  }
+}
+
+function diffuseStep(src, dst, mix) {
+  for (let z = 1; z < NZ - 1; z++) {
+    for (let x = 1; x < NX - 1; x++) {
+      const i = idx(x,z);
+      const n = src[idx(x, z - 1)];
+      const s = src[idx(x, z + 1)];
+      const e = src[idx(x + 1, z)];
+      const w = src[idx(x - 1, z)];
+      const c = src[i];
+      dst[i] = c * (1 - mix) + (n + s + e + w) * 0.25 * mix;
+    }
+  }
+}
+
+function updateField(dt) {
+  ambientPhase += dt * (0.36 + clamp((smoothedLoudness + 60) / 25, 0, 1) * 0.28);
+
+  for (let z = 1; z < NZ - 1; z++) {
+    for (let x = 1; x < NX - 1; x++) {
+      const i = idx(x,z);
+      const lap = field[idx(x-1,z)] + field[idx(x+1,z)] + field[idx(x,z-1)] + field[idx(x,z+1)] - field[i] * 4;
+      const slowWave = Math.sin(x * 0.11 + ambientPhase * 0.9) * Math.cos(z * 0.18 - ambientPhase * 0.55);
+      velocity[i] += lap * 0.028;
+      velocity[i] += slowWave * 0.00028 * (0.2 + clamp((smoothedLoudness + 60) / 35, 0, 1));
+      velocity[i] *= 0.945;
+      field[i] += velocity[i];
+      field[i] *= 0.978;
+      field[i] = clamp(field[i], -0.08, 0.34);
+    }
+  }
+
+  diffuseStep(field, scratch, 0.09);
+  diffuseStep(scratch, scratch2, 0.07);
+  for (let i = 0; i < FIELD_SIZE; i++) field[i] = scratch2[i];
+
+  attackEnergy *= 0.90;
+}
+
+function updateMist(dt) {
+  for (let i = 0; i < mistCount; i++) {
+    if (mistLife[i] <= 0) continue;
+    mistLife[i] -= dt * 0.85;
+    const base = i * 3;
+    mistPos[base + 0] += mistVel[base + 0] * (1 + attackEnergy * 0.9);
+    mistPos[base + 1] += mistVel[base + 1] * (1 + attackEnergy * 0.5);
+    mistPos[base + 2] += mistVel[base + 2];
+    mistVel[base + 1] *= 0.992;
+    const fade = Math.max(0, mistLife[i]);
+    mistCol[base + 0] *= 0.997;
+    mistCol[base + 1] *= 0.998;
+    mistCol[base + 2] *= 0.999;
+    if (fade <= 0) {
+      mistPos[base + 1] = -99;
+    }
+  }
+  mistGeo.attributes.position.needsUpdate = true;
+  mistGeo.attributes.color.needsUpdate = true;
+}
+
+function waveColor(heightNorm, crest, xNorm, zNorm) {
+  const valley = smoothstep(0.00, 0.32, heightNorm);
+  const body = smoothstep(0.18, 0.68, heightNorm);
+  const top = smoothstep(0.56, 1.00, heightNorm);
+  const hue = lerp(228, 186, valley)
+            - body * 10
+            - top * 6
+            + zNorm * 8
+            + Math.sin(xNorm * 5.6 + zNorm * 4.8 + ambientPhase * 0.50) * 4.8;
+  const sat = 0.52 + valley * 0.14 + body * 0.10;
+  const light = 0.085 + valley * 0.05 + body * 0.09 + top * 0.06 + crest * 0.035;
+  return hsl2rgb(hue, sat, light);
+}
+
+function crestColor(crest, brightNorm) {
+  const hue = lerp(92, 46, brightNorm);
+  const sat = 0.82;
+  const light = 0.24 + crest * 0.28;
+  return hsl2rgb(hue, sat, light);
+}
+
+function updateGeometry() {
+  const pitchNorm = mapLogFreqToUnit(smoothedPitch);
+  const brightNorm = clamp((Math.log(clamp(smoothedCentroid, 120, 4000)) - Math.log(120)) / (Math.log(4000) - Math.log(120)), 0, 1);
+  const loud = clamp((smoothedLoudness + 58) / 34, 0, 1);
+
+  for (let z = 0; z < NZ; z++) {
+    for (let x = 0; x < NX; x++) {
+      const i = idx(x,z);
+      const vi = i * 3;
+      const xNorm = x / (NX - 1);
+      const zNorm = z / (NZ - 1);
+      const lateralBias = 1 - Math.abs(xNorm - pitchNorm) * 1.15;
+      const oceanBias = 0.88 + 0.18 * Math.sin(zNorm * Math.PI);
+      const shaped = Math.max(0, field[i] * oceanBias * Math.max(0.35, lateralBias));
+      const hNorm = Math.pow(clamp(shaped * 1.35, 0, 1.0), 0.92);
+
+      const left = field[idx(Math.max(0, x - 1), z)];
+      const right = field[idx(Math.min(NX - 1, x + 1), z)];
+      const up = field[idx(x, Math.max(0, z - 1))];
+      const down = field[idx(x, Math.min(NZ - 1, z + 1))];
+      const slope = Math.abs(right - left) + Math.abs(down - up);
+      const cMask = smoothstep(0.035, 0.11, slope + shaped * 0.28) * smoothstep(0.16, 0.62, hNorm);
+      crestMask[i] = lerp(crestMask[i], cMask, 0.35);
+
+      const y = Math.pow(hNorm, 1.05) * (H * 0.88) + Math.sin((xNorm * 4.8 + zNorm * 2.3 + ambientPhase) * 1.05) * 0.008 * loud;
+      bodyPos[vi + 1] = y;
+      crestPos[vi + 1] = y + 0.01 + crestMask[i] * 0.028;
+      reflPos[vi + 1] = y;
+
+      const [br, bg, bb] = waveColor(hNorm, crestMask[i], xNorm, zNorm);
+      const depthFade = 0.74 + zNorm * 0.16;
+      bodyCol[vi + 0] = br * depthFade;
+      bodyCol[vi + 1] = bg * (0.92 + zNorm * 0.10);
+      bodyCol[vi + 2] = bb * (0.86 + zNorm * 0.22);
+
+      const [cr, cg, cb] = crestColor(crestMask[i], brightNorm * 0.68 + zNorm * 0.32);
+      const crestAmp = smoothstep(0.14, 0.56, crestMask[i]) * (0.22 + loud * 0.18);
+      crestCol[vi + 0] = cr * crestAmp;
+      crestCol[vi + 1] = cg * crestAmp;
+      crestCol[vi + 2] = cb * crestAmp;
+
+      const reflFade = 0.36 + zNorm * 0.12;
+      reflCol[vi + 0] = br * 0.22 * reflFade;
+      reflCol[vi + 1] = bg * 0.23 * reflFade;
+      reflCol[vi + 2] = bb * 0.27 * reflFade;
+    }
+  }
+
+  planeGeo.attributes.position.needsUpdate = true;
+  planeGeo.attributes.color.needsUpdate = true;
+  crestGeo.attributes.position.needsUpdate = true;
+  crestGeo.attributes.color.needsUpdate = true;
+  reflGeo.attributes.position.needsUpdate = true;
+  reflGeo.attributes.color.needsUpdate = true;
+  planeGeo.computeVertexNormals();
+  crestGeo.computeVertexNormals();
+  reflGeo.computeVertexNormals();
+}
+
+const elNote   = document.getElementById('v-note');
+const elFreq   = document.getElementById('v-freq');
+const elVol    = document.getElementById('v-vol');
+const elTimbre = document.getElementById('v-timbre');
+const elRange  = document.getElementById('v-range');
+function updateOverlay(d) {
+  elNote.textContent = d.note || '—';
+  elFreq.textContent = d.pitch ? d.pitch.toFixed(1) + ' Hz' : '— Hz';
+  const db = d.loudness ?? -80;
+  elVol.textContent = db.toFixed(1) + ' dB';
+  elVol.style.color = db > -18 ? '#ffd47d' : db > -42 ? '#8be6bf' : '#83c7ff';
+  elTimbre.textContent = d.timbre || '—';
+  elRange.textContent = d.range || '—';
+}
+
+const dot = document.getElementById('dot');
+function connect() {
+  const ws = new WebSocket('ws://localhost:8765');
+  ws.onopen = () => { wsReady = true; dot.classList.add('on'); };
+  ws.onclose = () => { wsReady = false; dot.classList.remove('on'); setTimeout(connect, 1500); };
+  ws.onerror = () => ws.close();
+  ws.onmessage = e => {
+    let d;
+    try { d = JSON.parse(e.data); } catch { return; }
+    ingestAudioFrame(d);
+    injectImpulse();
+    updateOverlay(d);
+  };
+}
+connect();
+
+function resize() {
+  const w = window.innerWidth, h = window.innerHeight;
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+  renderer.setSize(w, h);
+  composer.setSize(w, h);
+  bloomPass.resolution.set(w, h);
+}
+window.addEventListener('resize', resize);
+resize();
+
+let lastTime = performance.now();
+function animate(now) {
+  requestAnimationFrame(animate);
+  const dt = Math.min(0.033, (now - lastTime) / 1000 || 0.016);
+  lastTime = now;
+
+  updateField(dt);
+  updateGeometry();
+  updateMist(dt);
+
+  const idle = wsReady ? 1 : 0.6;
+  camera.position.x = lerp(camera.position.x, 2.42 + Math.sin(now * 0.00013) * 0.08 * idle, 0.012);
+  camera.position.y = lerp(camera.position.y, 1.80 + Math.cos(now * 0.00019) * 0.04 * idle, 0.012);
+  controls.target.x = lerp(controls.target.x, Math.sin(now * 0.00011) * 0.04, 0.01);
+  controls.target.z = lerp(controls.target.z, 0.18 + Math.cos(now * 0.00014) * 0.03, 0.01);
+  controls.update();
+  composer.render();
+}
+requestAnimationFrame(animate);
+</script>
+</body>
+</html>
