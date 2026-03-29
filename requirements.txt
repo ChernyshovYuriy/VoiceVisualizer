@@ -8,11 +8,9 @@ sounddevice>=0.4.6
 soundfile>=0.12.1
 scipy>=1.11.0
 websockets>=12.0
-demucs
-torchcodec
 
-# pip uninstall -y demucs torch torchcodec torchaudio torchvision
-# pip cache purge
-# pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision torchaudio
-# pip install torchcodec
-# pip install demucs
+# Optional separator backends for offline vocal preprocessing
+# Preferred backend (in-process):
+demucs>=4.0.1
+# Fallback backend (CLI):
+spleeter>=2.4.0

@@ -67,6 +67,9 @@ pip install -r requirements.txt
 # macOS:   brew install ffmpeg
 # Ubuntu:  sudo apt install ffmpeg
 # Windows: https://ffmpeg.org/download.html  (add to PATH)
+
+# Optional: install Demucs runtime dependencies explicitly (CPU build)
+# pip install --index-url https://download.pytorch.org/whl/cpu torch torchaudio torchvision
 ```
 
 > **macOS note** — if PyOpenGL shows a black widget, install the system
@@ -129,17 +132,43 @@ live_visualizer/
 
 ## Offline vocal preprocessing
 
-This project can now preprocess media offline and visualize a cached vocals stem in sync with the original playback audio.
+The app preprocesses media offline and visualizes a cached vocals stem while playing the original media track.
 
-Requirements:
+### Backend strategy
+
+1. **Demucs (preferred)**: runs **in-process** (Python API), keeps separated tensors in memory, and writes WAV stems with `soundfile.write`.
+2. **Spleeter (fallback)**: if Demucs is unavailable or fails (Torch/TorchCodec/CUDA/shared-library/runtime issues), the app automatically falls back to Spleeter CLI.
+
+This avoids fragile Demucs CLI output-saving paths and keeps stem writing on a standard WAV writer.
+
+### Requirements
+
 - `ffmpeg` on PATH
-- one separator backend: `demucs` or `spleeter`
+- At least one separator backend:
+  - **Demucs (preferred):**
+    ```bash
+    pip install demucs
+    # If needed, install matching torch wheels first (CPU example):
+    pip install --index-url https://download.pytorch.org/whl/cpu torch torchaudio torchvision
+    ```
+  - **Spleeter fallback:**
+    ```bash
+    pip install spleeter
+    ```
 
-Flow:
+### Preprocess/cache flow
+
 1. Open a media file.
-2. The app extracts mono WAV audio into a cache folder.
-3. It separates `vocals.wav` and `accompaniment.wav`.
-4. Playback uses the original audio track.
-5. Analysis uses either `vocals.wav` or the full mix, selected from the toolbar.
+2. The app extracts mono WAV audio into cache.
+3. Separator backend generates `vocals.wav` + `accompaniment.wav`.
+4. Playback uses original extracted audio.
+5. Analyzer uses vocals stem or full mix based on toolbar mode.
+6. Results are cached by source-file hash and reused on next load.
 
 Cache location: `~/.voice_music_visualizer/cache/`
+
+### Troubleshooting notes
+
+- If Demucs fails at inference/runtime, the app auto-falls back to Spleeter.
+- Error dialogs now distinguish extraction/separation issues and include backend + stage details.
+- If both backends fail, install/verify at least one backend and retry.

@@ -10,9 +10,13 @@ from pathlib import Path
 from typing import Callable
 
 from core.cache_manager import CacheManager
-from core.separation import extract_audio_to_wav, separate_vocals
+from core.separation import SeparationError, extract_audio_to_wav, separate_vocals
 
 ProgressFn = Callable[[str], None]
+
+
+class PreprocessError(RuntimeError):
+    """User-facing preprocessing error with technical details attached."""
 
 
 @dataclass(frozen=True)
@@ -46,13 +50,27 @@ class Preprocessor:
             )
 
         self._emit(progress, f"Extracting audio from {source_path.name}…")
-        extract_audio_to_wav(source_path, entry.original_audio)
+        try:
+            extract_audio_to_wav(source_path, entry.original_audio)
+        except Exception as exc:
+            raise PreprocessError(
+                "Could not decode audio from this file. Please verify ffmpeg is installed and the media format is supported."
+                f"\n\nDetails:\n{exc}"
+            ) from exc
 
-        vocals, accompaniment, backend = separate_vocals(
-            entry.original_audio,
-            entry.root,
-            progress=progress,
-        )
+        try:
+            vocals, accompaniment, backend = separate_vocals(
+                entry.original_audio,
+                entry.root,
+                progress=progress,
+            )
+        except SeparationError as exc:
+            raise PreprocessError(
+                "Could not generate vocal stems for offline analysis. "
+                "Try installing Demucs and/or Spleeter as documented in the README."
+                f"\n\nDetails:\n{exc}"
+            ) from exc
+
         self._cache.write_meta(entry, {
             "source_path": str(source_path),
             "separator_backend": backend,
