@@ -10,6 +10,7 @@ import webbrowser
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal, Slot, QUrl
+from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
@@ -179,6 +180,7 @@ class MainWindow(QMainWindow):
         self._worker: _PrepareWorker | None = None
         self._pending_seek_seconds = 0.0
         self._pending_resume = False
+        self._preprocessor = Preprocessor()
 
         try:
             self._ws = WSServer(self._live)
@@ -187,12 +189,28 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "WS server", str(e))
 
         self._bridge.frame_ready.connect(self._on_frame)
+        self._build_menu()
         self._build_ui()
 
         self._tick = QTimer(self)
         self._tick.setInterval(100)
         self._tick.timeout.connect(self._tick_cb)
         self._tick.start()
+
+    def _build_menu(self) -> None:
+        file_menu = self.menuBar().addMenu("&File")
+
+        open_action = QAction("Open media…", self)
+        open_action.triggered.connect(self._open_file)
+        file_menu.addAction(open_action)
+
+        open_pair_action = QAction("Open media with external vocals stem…", self)
+        open_pair_action.triggered.connect(self._open_manual_pair)
+        file_menu.addAction(open_pair_action)
+
+        preprocess_action = QAction("Preprocess media…", self)
+        preprocess_action.triggered.connect(self._preprocess_only)
+        file_menu.addAction(preprocess_action)
 
     def _build_ui(self) -> None:
         root = QWidget()
@@ -214,6 +232,10 @@ class MainWindow(QMainWindow):
         self._btn_play.setEnabled(False)
         self._btn_play.clicked.connect(self._toggle_play)
 
+        self._btn_open_pair = QPushButton("🧩  Open media + vocals…")
+        self._btn_open_pair.setFixedHeight(34)
+        self._btn_open_pair.clicked.connect(self._open_manual_pair)
+
         self._mode = QComboBox()
         self._mode.addItem("Vocals only", userData="vocals")
         self._mode.addItem("Full mix", userData="full_mix")
@@ -223,6 +245,7 @@ class MainWindow(QMainWindow):
         self._lbl_file.setStyleSheet("color: #545d68; font-size: 12px;")
 
         tb.addWidget(self._btn_open)
+        tb.addWidget(self._btn_open_pair)
         tb.addWidget(self._btn_play)
         tb.addWidget(self._mode)
         tb.addSpacing(6)
@@ -310,7 +333,66 @@ class MainWindow(QMainWindow):
         self._lbl_cur.setText("0:00")
         self._lbl_dur.setText("0:00")
         self._slider.setValue(0)
-        self._start_prepare_worker(source_path=self._source_path, prepared_media=None)
+        cache_state = self._preprocessor.check_cache(self._source_path)
+        self._lbl_file.setText(cache_state.message)
+        self._lbl_file.setStyleSheet("color:#58a6ff; font-size:12px;")
+        if cache_state.prepared is not None:
+            self._start_prepare_worker(source_path=None, prepared_media=cache_state.prepared)
+            return
+
+        prompt = QMessageBox.question(
+            self,
+            "Preprocessing required",
+            f"{cache_state.message}\nPreprocessing required.\n\nRun preprocessing now?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if prompt == QMessageBox.Yes:
+            self._start_prepare_worker(source_path=self._source_path, prepared_media=None)
+        else:
+            self._lbl_file.setText("Preprocessing required")
+            self._lbl_file.setStyleSheet("color:#d29922; font-size:12px;")
+
+    def _open_manual_pair(self) -> None:
+        if self._worker_thread is not None:
+            return
+        media, _ = QFileDialog.getOpenFileName(self, "Open original media", "", _FILTER)
+        if not media:
+            return
+        vocals, _ = QFileDialog.getOpenFileName(self, "Open vocals stem", "", "Audio (*.wav *.mp3 *.flac *.ogg *.m4a *.aac)")
+        if not vocals:
+            return
+        source_path = Path(media)
+        vocals_path = Path(vocals)
+        self._source_path = source_path
+        self._prepared = self._preprocessor.build_external_prepared(source_path, vocals_path)
+        self._player.stop()
+        self._buffer.reset()
+        self._btn_play.setText("▶  Play")
+        self._btn_play.setEnabled(False)
+        self._lbl_cur.setText("0:00")
+        self._lbl_dur.setText("0:00")
+        self._slider.setValue(0)
+        self._lbl_file.setText("Loading external vocals stem…")
+        self._lbl_file.setStyleSheet("color:#58a6ff; font-size:12px;")
+        self._start_prepare_worker(source_path=None, prepared_media=self._prepared)
+
+    def _preprocess_only(self) -> None:
+        if self._worker_thread is not None:
+            return
+        sel, _ = QFileDialog.getOpenFileName(self, "Preprocess media file", "", _FILTER)
+        if not sel:
+            return
+        source_path = Path(sel)
+        cache_state = self._preprocessor.check_cache(source_path)
+        if cache_state.prepared is not None:
+            QMessageBox.information(self, "Preprocess media", "Using cached vocals.")
+            self._lbl_file.setText("Using cached vocals")
+            self._lbl_file.setStyleSheet("color:#58a6ff; font-size:12px;")
+            return
+        self._source_path = source_path
+        self._prepared = None
+        self._start_prepare_worker(source_path=source_path, prepared_media=None)
 
     def _reload_analysis_track_if_ready(self) -> None:
         if self._prepared is None or self._worker_thread is not None:
@@ -335,6 +417,7 @@ class MainWindow(QMainWindow):
         self._lbl_file.setText(f"Preparing {mode_label} for {source_name} …")
         self._lbl_file.setStyleSheet("color:#58a6ff; font-size:12px;")
         self._btn_open.setEnabled(False)
+        self._btn_open_pair.setEnabled(False)
         self._btn_play.setEnabled(False)
         self._mode.setEnabled(False)
 
@@ -402,6 +485,7 @@ class MainWindow(QMainWindow):
             self._progress.deleteLater()
             self._progress = None
         self._btn_open.setEnabled(True)
+        self._btn_open_pair.setEnabled(True)
         self._mode.setEnabled(True)
         if self._worker_thread is not None:
             self._worker_thread.quit()

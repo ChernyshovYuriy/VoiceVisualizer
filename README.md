@@ -156,16 +156,81 @@ This avoids fragile Demucs CLI output-saving paths and keeps stem writing on a s
     pip install spleeter
     ```
 
-### Preprocess/cache flow
+### CLI preprocessing (persistent cache warm-up)
 
-1. Open a media file.
-2. The app extracts mono WAV audio into cache.
-3. Separator backend generates `vocals.wav` + `accompaniment.wav`.
-4. Playback uses original extracted audio.
-5. Analyzer uses vocals stem or full mix based on toolbar mode.
-6. Results are cached by source-file hash and reused on next load.
+Preprocess ahead of time from terminal (audio or video input):
 
-Cache location: `~/.voice_music_visualizer/cache/`
+```bash
+python -m tools.preprocess_media /path/to/file.mp3
+python -m tools.preprocess_media /path/to/file.mp4
+```
+
+Behavior:
+
+- computes a stable source hash (SHA-256 based)
+- checks cache first
+- prints `Using cached vocals.` and exits if present/valid
+- otherwise extracts audio, runs separation, and writes:
+  - `original_audio.wav`
+  - `vocals.wav`
+  - `accompaniment.wav`
+  - `meta.json`
+- prints final output paths and cache key
+
+### Cache model and location
+
+Cache root:
+
+```text
+~/.voice_music_visualizer/cache/
+```
+
+Each source hash has its own directory:
+
+```text
+<cache>/<file_hash>/
+  original_audio.wav
+  vocals.wav
+  accompaniment.wav
+  meta.json
+```
+
+`meta.json` stores:
+
+- original source path
+- source file hash
+- duration (when available)
+- separator backend
+- created timestamp (UTC)
+- output paths
+
+### UI cache-first load behavior
+
+When opening media in the UI:
+
+1. The app computes/checks cache first.
+2. If valid cache exists, it loads immediately with status `Using cached vocals.`
+3. If cache is missing/invalid, it shows:
+   - `Cached vocals not found.`
+   - `Preprocessing required.`
+4. User can choose to preprocess immediately or cancel.
+
+If cache metadata exists but outputs are missing/corrupt/hash-mismatched, cache is invalidated and regeneration is required.
+
+### Manual pair loading (bypass preprocess/cache)
+
+Use **File → Open media with external vocals stem…** (or the toolbar button) to load:
+
+- original media (for playback)
+- vocals stem (for analysis)
+
+This bypasses cache lookup and preprocessing and preserves the existing “play original media, analyze vocals stem” architecture.
+
+### Implementation notes
+
+- **Cache key strategy**: SHA-256 over source bytes + normalized suffix; first 24 hex chars.
+- **UI cache-first**: open flow performs `check_cache` before worker preprocessing.
+- **Manual pair flow**: creates a prepared media object directly from selected media + vocals paths, then decodes tracks on worker thread.
 
 ### Troubleshooting notes
 
