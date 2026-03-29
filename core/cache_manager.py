@@ -48,9 +48,6 @@ class CacheManager:
     def has_vocal_stems(self, entry: CacheEntry) -> bool:
         return entry.original_audio.exists() and entry.vocals.exists() and entry.accompaniment.exists()
 
-    def has_original_audio(self, entry: CacheEntry) -> bool:
-        return entry.original_audio.exists()
-
     def write_meta(self, entry: CacheEntry, payload: dict[str, Any]) -> None:
         entry.meta.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
@@ -61,11 +58,11 @@ class CacheManager:
 
     def _hash_file(self, path: Path) -> str:
         h = hashlib.sha256()
-        with path.open('rb') as f:
+        with path.open("rb") as f:
             while True:
                 chunk = f.read(1024 * 1024)
                 if not chunk:
                     break
                 h.update(chunk)
-        h.update(str(path.suffix.lower()).encode('utf-8'))
+        h.update(str(path.suffix.lower()).encode("utf-8"))
         return h.hexdigest()[:24]

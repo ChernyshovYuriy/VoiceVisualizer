@@ -1,21 +1,29 @@
 """
 main_window.py
-PySide6 main window.
-Left panel : file controls + seek bar.
-Right panel: Three.js 3D surface in QWebEngineView (or browser fallback).
+PySide6 main window for the current browser-embedded visualizer.
+Includes offline vocal preprocessing with the heavy work offloaded to QThread.
 """
 
 from __future__ import annotations
+
 import webbrowser
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer, Signal, QObject, QUrl, QThread
+from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal, Slot, QUrl
 from PySide6.QtWidgets import (
-    QFileDialog, QHBoxLayout, QLabel, QMainWindow, QPushButton,
-    QSlider, QVBoxLayout, QWidget, QMessageBox,
+    QComboBox,
+    QFileDialog,
+    QHBoxLayout,
+    QLabel,
+    QMainWindow,
+    QMessageBox,
+    QProgressDialog,
+    QPushButton,
+    QSlider,
+    QVBoxLayout,
+    QWidget,
 )
 
-# Optional WebEngine — fall back to system browser if not installed
 try:
     from PySide6.QtWebEngineWidgets import QWebEngineView
     from PySide6.QtWebEngineCore import QWebEngineSettings
@@ -23,10 +31,11 @@ try:
 except ImportError:
     HAS_WEBENGINE = False
 
-from core.player import Player, PreparedSource, AUDIO_EXT, VIDEO_EXT
+from core.player import Player, PreparedTracks, AUDIO_EXT, VIDEO_EXT
 from core.buffer import RollingBuffer
 from core.analyzer import Analyzer, FrameInfo
 from core.live_state import LiveState
+from core.preprocess import PreparedMedia, Preprocessor
 from core.ws_server import WSServer
 
 _ACCEPT = " ".join(f"*{e}" for e in sorted(AUDIO_EXT | VIDEO_EXT))
@@ -34,32 +43,50 @@ _FILTER = f"Audio / Video ({_ACCEPT})"
 _HTML = Path(__file__).parent.parent / "frontend" / "visualizer.html"
 
 
-def _fmt(s: float) -> str:
-    m, sec = divmod(int(s), 60)
-    return f"{m}:{sec:02d}"
-
-
 class _Bridge(QObject):
     frame_ready = Signal(object)
 
 
-class _LoadWorker(QObject):
-    loaded = Signal(object)
+class _PrepareWorker(QObject):
+    progress = Signal(str)
+    finished = Signal(object, object)
     failed = Signal(str)
-    finished = Signal()
 
-    def __init__(self, path: Path) -> None:
+    def __init__(
+        self,
+        source_path: Path | None,
+        prepared_media: PreparedMedia | None,
+        analysis_mode: str,
+    ) -> None:
         super().__init__()
-        self._path = path
+        self._source_path = source_path
+        self._prepared_media = prepared_media
+        self._analysis_mode = analysis_mode
+        self._preprocessor = Preprocessor()
 
+    @Slot()
     def run(self) -> None:
         try:
-            prepared = Player.prepare_source(self._path)
-            self.loaded.emit(prepared)
+            prepared = self._prepared_media
+            if prepared is None:
+                if self._source_path is None:
+                    raise RuntimeError("No input source provided.")
+                prepared = self._preprocessor.prepare(self._source_path, progress=self.progress.emit)
+            else:
+                self.progress.emit("Loading cached prepared media…")
+
+            analysis_path = (
+                prepared.vocals_path
+                if self._analysis_mode == "vocals"
+                else prepared.original_audio_path
+            )
+            self.progress.emit(
+                f"Decoding {'vocals stem' if self._analysis_mode == 'vocals' else 'full mix'} for playback…"
+            )
+            tracks = Player.prepare_tracks(prepared.original_audio_path, analysis_path)
+            self.finished.emit(prepared, tracks)
         except Exception as exc:
             self.failed.emit(str(exc))
-        finally:
-            self.finished.emit()
 
 
 APP_STYLE = """
@@ -93,6 +120,14 @@ QSlider::handle:horizontal {
 }
 QSlider::handle:horizontal:hover { background: #79c0ff; }
 QSplitter::handle { background: #21262d; }
+QComboBox {
+    background-color: #21262d;
+    color: #e6edf3;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    padding: 5px 10px;
+}
+QComboBox:hover { border-color: #58a6ff; }
 """
 
 DIALOG_STYLE = """
@@ -119,6 +154,11 @@ QScrollBar::handle:vertical { background: #30363d; border-radius: 4px; min-heigh
 """
 
 
+def _fmt(s: float) -> str:
+    m, sec = divmod(int(s), 60)
+    return f"{m}:{sec:02d}"
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -126,18 +166,20 @@ class MainWindow(QMainWindow):
         self.resize(1280, 760)
         self.setStyleSheet(APP_STYLE)
 
-        # ── core objects ──────────────────────────────────────────────────────
         self._live = LiveState()
         self._buffer = RollingBuffer()
         self._bridge = _Bridge()
         self._analyzer = Analyzer(self._buffer, self._bridge.frame_ready.emit)
         self._player = Player(on_chunk=self._analyzer.push_chunk)
         self._slider_dragging = False
-        self._load_thread: QThread | None = None
-        self._load_worker: _LoadWorker | None = None
-        self._pending_path: Path | None = None
+        self._prepared: PreparedMedia | None = None
+        self._source_path: Path | None = None
+        self._progress: QProgressDialog | None = None
+        self._worker_thread: QThread | None = None
+        self._worker: _PrepareWorker | None = None
+        self._pending_seek_seconds = 0.0
+        self._pending_resume = False
 
-        # Start WS server (feeds Three.js frontend)
         try:
             self._ws = WSServer(self._live)
             self._ws.start()
@@ -152,8 +194,6 @@ class MainWindow(QMainWindow):
         self._tick.timeout.connect(self._tick_cb)
         self._tick.start()
 
-    # ── UI ────────────────────────────────────────────────────────────────────
-
     def _build_ui(self) -> None:
         root = QWidget()
         self.setCentralWidget(root)
@@ -161,7 +201,6 @@ class MainWindow(QMainWindow):
         vbox.setContentsMargins(10, 10, 10, 8)
         vbox.setSpacing(8)
 
-        # ── toolbar ───────────────────────────────────────────────────────────
         tb = QHBoxLayout()
         tb.setSpacing(8)
 
@@ -175,11 +214,17 @@ class MainWindow(QMainWindow):
         self._btn_play.setEnabled(False)
         self._btn_play.clicked.connect(self._toggle_play)
 
+        self._mode = QComboBox()
+        self._mode.addItem("Vocals only", userData="vocals")
+        self._mode.addItem("Full mix", userData="full_mix")
+        self._mode.currentIndexChanged.connect(self._reload_analysis_track_if_ready)
+
         self._lbl_file = QLabel("No file loaded")
         self._lbl_file.setStyleSheet("color: #545d68; font-size: 12px;")
 
         tb.addWidget(self._btn_open)
         tb.addWidget(self._btn_play)
+        tb.addWidget(self._mode)
         tb.addSpacing(6)
         tb.addWidget(self._lbl_file)
         tb.addStretch()
@@ -200,10 +245,8 @@ class MainWindow(QMainWindow):
             self._view.setStyleSheet("background:#000;")
             page = self._view.page()
             settings = page.settings()
-            settings.setAttribute(
-                QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True)
-            settings.setAttribute(
-                QWebEngineSettings.WebAttribute.JavascriptEnabled, True)
+            settings.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True)
+            settings.setAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled, True)
             self._view.load(QUrl.fromLocalFile(str(_HTML.resolve())))
             vbox.addWidget(self._view, stretch=1)
         else:
@@ -232,8 +275,7 @@ class MainWindow(QMainWindow):
 
         self._slider = QSlider(Qt.Horizontal)
         self._slider.setRange(0, 1000)
-        self._slider.sliderPressed.connect(
-            lambda: setattr(self, "_slider_dragging", True))
+        self._slider.sliderPressed.connect(lambda: setattr(self, "_slider_dragging", True))
         self._slider.sliderReleased.connect(self._on_seek)
         self._slider.sliderMoved.connect(self._on_slider_moved)
 
@@ -245,12 +287,9 @@ class MainWindow(QMainWindow):
         sb.addWidget(self._lbl_dur)
         vbox.addLayout(sb)
 
-    # ── slots ─────────────────────────────────────────────────────────────────
-
     def _open_file(self) -> None:
-        if self._load_thread is not None:
+        if self._worker_thread is not None:
             return
-
         dlg = QFileDialog(self, "Open audio or video file")
         dlg.setFileMode(QFileDialog.ExistingFile)
         dlg.setNameFilter(_FILTER)
@@ -262,49 +301,116 @@ class MainWindow(QMainWindow):
         if not sel:
             return
 
-        p = Path(sel[0])
+        self._source_path = Path(sel[0])
+        self._prepared = None
         self._player.stop()
         self._buffer.reset()
         self._btn_play.setText("▶  Play")
         self._btn_play.setEnabled(False)
-        self._slider.setValue(0)
         self._lbl_cur.setText("0:00")
         self._lbl_dur.setText("0:00")
-        self._pending_path = p
-        self._lbl_file.setText(f"Preparing {p.name} …")
+        self._slider.setValue(0)
+        self._start_prepare_worker(source_path=self._source_path, prepared_media=None)
+
+    def _reload_analysis_track_if_ready(self) -> None:
+        if self._prepared is None or self._worker_thread is not None:
+            return
+        self._pending_resume = self._player.is_playing
+        self._pending_seek_seconds = self._player.current_time
+        self._player.pause()
+        self._btn_play.setText("▶  Play")
+        self._start_prepare_worker(source_path=None, prepared_media=self._prepared)
+
+    def _analysis_mode(self) -> str:
+        return str(self._mode.currentData())
+
+    def _start_prepare_worker(
+        self,
+        *,
+        source_path: Path | None,
+        prepared_media: PreparedMedia | None,
+    ) -> None:
+        mode_label = "vocals" if self._analysis_mode() == "vocals" else "full mix"
+        source_name = source_path.name if source_path else (prepared_media.source_path.name if prepared_media else "media")
+        self._lbl_file.setText(f"Preparing {mode_label} for {source_name} …")
         self._lbl_file.setStyleSheet("color:#58a6ff; font-size:12px;")
         self._btn_open.setEnabled(False)
+        self._btn_play.setEnabled(False)
+        self._mode.setEnabled(False)
 
-        self._load_thread = QThread(self)
-        self._load_worker = _LoadWorker(p)
-        self._load_worker.moveToThread(self._load_thread)
-        self._load_thread.started.connect(self._load_worker.run)
-        self._load_worker.loaded.connect(self._on_loaded)
-        self._load_worker.failed.connect(self._on_load_failed)
-        self._load_worker.finished.connect(self._load_thread.quit)
-        self._load_worker.finished.connect(self._load_worker.deleteLater)
-        self._load_thread.finished.connect(self._on_load_thread_finished)
-        self._load_thread.finished.connect(self._load_thread.deleteLater)
-        self._load_thread.start()
+        self._progress = QProgressDialog("Preparing media…", "", 0, 0, self)
+        self._progress.setWindowTitle("Offline preprocessing")
+        self._progress.setWindowModality(Qt.WindowModal)
+        self._progress.setCancelButton(None)
+        self._progress.setMinimumDuration(0)
+        self._progress.setValue(0)
+        self._progress.show()
 
-    def _on_loaded(self, prepared: PreparedSource) -> None:
-        assert self._pending_path is not None
-        dur = self._player.load_prepared(prepared)
-        self._lbl_file.setText(f"{self._pending_path.name}  ·  {_fmt(dur)}")
+        self._worker_thread = QThread(self)
+        self._worker = _PrepareWorker(source_path, prepared_media, self._analysis_mode())
+        self._worker.moveToThread(self._worker_thread)
+        self._worker_thread.started.connect(self._worker.run)
+        self._worker.progress.connect(self._on_worker_progress)
+        self._worker.finished.connect(self._on_worker_finished)
+        self._worker.failed.connect(self._on_worker_failed)
+        self._worker.finished.connect(self._cleanup_worker)
+        self._worker.failed.connect(self._cleanup_worker)
+        self._worker_thread.start()
+
+    @Slot(str)
+    def _on_worker_progress(self, text: str) -> None:
+        if self._progress is not None:
+            self._progress.setLabelText(text)
+        self._lbl_file.setText(text)
+        self._lbl_file.setStyleSheet("color:#58a6ff; font-size:12px;")
+
+    @Slot(object, object)
+    def _on_worker_finished(self, prepared: object, tracks: object) -> None:
+        assert isinstance(prepared, PreparedMedia)
+        assert isinstance(tracks, PreparedTracks)
+        self._prepared = prepared
+        dur = self._player.load_prepared(tracks)
+        if self._pending_seek_seconds > 0:
+            self._player.seek(self._pending_seek_seconds)
+        if self._pending_resume:
+            self._player.play(on_end=lambda: self._btn_play.setText("▶  Play"))
+            self._btn_play.setText("⏸  Pause")
+        else:
+            self._btn_play.setText("▶  Play")
+
+        cache_note = "cached" if prepared.from_cache else f"new {prepared.separator_backend} stems"
+        mode_label = "Vocals only" if self._analysis_mode() == "vocals" else "Full mix"
+        self._lbl_file.setText(f"{prepared.source_path.name}  ·  {_fmt(dur)}  ·  {mode_label}  ·  {cache_note}")
         self._lbl_file.setStyleSheet("color:#adbac7; font-size:12px;")
         self._lbl_dur.setText(_fmt(dur))
         self._btn_play.setEnabled(True)
+        self._pending_seek_seconds = 0.0
+        self._pending_resume = False
 
-    def _on_load_failed(self, message: str) -> None:
+    @Slot(str)
+    def _on_worker_failed(self, message: str) -> None:
         self._lbl_file.setText("Load failed")
         self._lbl_file.setStyleSheet("color:#f85149; font-size:12px;")
-        QMessageBox.critical(self, "Load error", message)
+        self._pending_seek_seconds = 0.0
+        self._pending_resume = False
+        QMessageBox.critical(self, "Preprocess error", message)
 
-    def _on_load_thread_finished(self) -> None:
+    @Slot()
+    def _cleanup_worker(self) -> None:
+        if self._progress is not None:
+            self._progress.close()
+            self._progress.deleteLater()
+            self._progress = None
         self._btn_open.setEnabled(True)
-        self._load_thread = None
-        self._load_worker = None
-        self._pending_path = None
+        self._mode.setEnabled(True)
+        if self._worker_thread is not None:
+            self._worker_thread.quit()
+            self._worker_thread.wait()
+            self._worker_thread.deleteLater()
+            self._worker_thread = None
+        if self._worker is not None:
+            self._worker.deleteLater()
+            self._worker = None
 
     def _toggle_play(self) -> None:
         if self._player.is_playing:
@@ -314,15 +420,15 @@ class MainWindow(QMainWindow):
             self._player.play(on_end=lambda: self._btn_play.setText("▶  Play"))
             self._btn_play.setText("⏸  Pause")
 
-    def _on_frame(self, info: object) -> None:
+    def _on_frame(self, info: FrameInfo) -> None:
         mel_latest = self._buffer.snapshot()[0][-1]
         self._live.update(
             mel=mel_latest,
-            pitch=getattr(info, "pitch_hz"),
-            loudness=getattr(info, "loudness_db"),
-            note=getattr(info, "note_name"),
-            timbre=getattr(info, "timbre"),
-            vocal_range=getattr(info, "vocal_range"),
+            pitch=info.pitch_hz,
+            loudness=info.loudness_db,
+            note=info.note_name,
+            timbre=info.timbre,
+            vocal_range=info.vocal_range,
         )
 
     def _on_slider_moved(self, v: int) -> None:
@@ -350,7 +456,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         self._player.stop()
-        if self._load_thread is not None:
-            self._load_thread.quit()
-            self._load_thread.wait(2000)
+        if self._worker_thread is not None:
+            self._worker_thread.quit()
+            self._worker_thread.wait(2000)
         super().closeEvent(event)
