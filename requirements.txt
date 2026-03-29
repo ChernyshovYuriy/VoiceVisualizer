@@ -14,4 +14,5 @@ torchcodec
 # pip uninstall -y demucs torch torchcodec torchaudio torchvision
 # pip cache purge
 # pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision torchaudio
+# pip install torchcodec
 # pip install demucs
