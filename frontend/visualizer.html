@@ -163,9 +163,24 @@ const VIS = {
     shimmerOpacity: 0.46,
   },
   hero: {
-    lineSegments: 96,
+    lineSegments: 108,
     width: 0.075,
     pulseDecay: 0.90,
+    energyAttack: 0.26,
+    energyRelease: 0.10,
+    confidenceAttack: 0.15,
+    confidenceRelease: 0.08,
+    pitchGlide: 0.14,
+    vibratoDepth: 0.022,
+    idleFloor: 0.10,
+    hoverBase: 0.35,
+    hoverRange: 0.56,
+    haloBase: 0.18,
+    haloBoost: 0.48,
+    dustOrbitRadius: 0.26,
+    dustFieldHeight: 0.22,
+    noteFlashDecay: 0.90,
+    shockwaveDecay: 0.86,
   },
   palette: {
     bg: 0x040913,
@@ -206,6 +221,15 @@ let transientAccent = 0;
 let lastPitchNorm = 0.5;
 let lastNoteName = '—';
 let noteChangeFlash = 0;
+let heroEnergy = 0;
+let heroConfidence = 0;
+let heroPitchLift = 0.5;
+let heroVibrato = 0;
+let heroBreath = 0;
+let heroAir = 0;
+let heroSilence = 1;
+let shockwave = 0;
+let shockwavePhase = 0;
 
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 function lerp(a,b,t){ return a + (b-a)*t; }
@@ -226,6 +250,28 @@ function mapLogFreqToUnit(hz) {
   const f = clamp(hz || 220, 80, 1500);
   const lo = Math.log(80), hi = Math.log(1500);
   return clamp((Math.log(f) - lo) / (hi - lo), 0, 1);
+}
+
+function deriveHeroState(dt = 1 / 60) {
+  const loud = clamp((smoothedLoudness + 58) / 34, 0, 1);
+  const spread = clamp(audioState.spread || 0.45, 0.18, 1.35);
+  const airy = clamp((spread - 0.28) / 0.95, 0, 1);
+  const signal = clamp(noteConfidence * 0.65 + loud * 0.45 + (audioState.peak || 0) * 0.28, 0, 1);
+  const stableLift = clamp(noteStable * 0.9 + (1 - vibratoSignal) * 0.3, 0, 1);
+  const attack = 1 - Math.pow(1 - VIS.hero.energyAttack, dt * 60);
+  const release = 1 - Math.pow(1 - VIS.hero.energyRelease, dt * 60);
+  heroEnergy = lerp(heroEnergy, signal, signal > heroEnergy ? attack : release);
+
+  const confAtk = 1 - Math.pow(1 - VIS.hero.confidenceAttack, dt * 60);
+  const confRel = 1 - Math.pow(1 - VIS.hero.confidenceRelease, dt * 60);
+  const confidenceTarget = clamp(noteConfidence * 0.74 + stableLift * 0.26, 0, 1);
+  heroConfidence = lerp(heroConfidence, confidenceTarget, confidenceTarget > heroConfidence ? confAtk : confRel);
+
+  heroPitchLift = lerp(heroPitchLift, smoothedPitchNorm, 1 - Math.pow(1 - VIS.hero.pitchGlide, dt * 60));
+  heroVibrato = lerp(heroVibrato, clamp(vibratoSignal * stableLift, 0, 1), 1 - Math.pow(1 - 0.22, dt * 60));
+  heroBreath = lerp(heroBreath, clamp(attackEnergy * 0.58 + transientAccent * 0.42, 0, 1), 1 - Math.pow(1 - 0.24, dt * 60));
+  heroAir = lerp(heroAir, airy, 1 - Math.pow(1 - 0.08, dt * 60));
+  heroSilence = clamp(1 - signal, 0, 1);
 }
 
 function ingestAudioFrame(d) {
@@ -270,6 +316,7 @@ function ingestAudioFrame(d) {
   if (hasNote && d.note !== lastNoteName) {
     notePulse = 1.0;
     noteChangeFlash = 1.0;
+    shockwave = 1.0;
     lastNoteName = d.note;
   }
   const pitchDelta = Math.abs(smoothedPitchNorm - lastPitchNorm);
@@ -437,6 +484,30 @@ const heroCore = new THREE.Mesh(
 );
 scene.add(heroCore);
 
+const heroHalo = new THREE.Mesh(
+  new THREE.SphereGeometry(0.135, 30, 30),
+  new THREE.MeshBasicMaterial({
+    color:0xbfeaff,
+    transparent:true,
+    opacity:0.22,
+    blending:THREE.AdditiveBlending,
+    depthWrite:false
+  })
+);
+scene.add(heroHalo);
+
+const heroInnerCore = new THREE.Mesh(
+  new THREE.SphereGeometry(0.048, 20, 20),
+  new THREE.MeshBasicMaterial({
+    color:0xf4fdff,
+    transparent:true,
+    opacity:0.58,
+    blending:THREE.AdditiveBlending,
+    depthWrite:false
+  })
+);
+scene.add(heroInnerCore);
+
 const pulseRing = new THREE.Mesh(
   new THREE.RingGeometry(0.11, 0.145, 64),
   new THREE.MeshBasicMaterial({
@@ -450,6 +521,20 @@ const pulseRing = new THREE.Mesh(
 );
 pulseRing.rotation.x = -Math.PI / 2;
 scene.add(pulseRing);
+
+const contactRing = new THREE.Mesh(
+  new THREE.RingGeometry(0.18, 0.235, 64),
+  new THREE.MeshBasicMaterial({
+    color:0x9ddcff,
+    transparent:true,
+    opacity:0.0,
+    blending:THREE.AdditiveBlending,
+    depthWrite:false,
+    side:THREE.DoubleSide
+  })
+);
+contactRing.rotation.x = -Math.PI / 2;
+scene.add(contactRing);
 
 const shimmerCount = 180;
 const shimmerPos = new Float32Array(shimmerCount * 3);
@@ -470,6 +555,31 @@ const shimmer = new THREE.Points(shimmerGeo, new THREE.PointsMaterial({
   sizeAttenuation:true
 }));
 scene.add(shimmer);
+
+const dustCount = 220;
+const dustPos = new Float32Array(dustCount * 3);
+const dustCol = new Float32Array(dustCount * 3);
+const dustPhase = new Float32Array(dustCount);
+const dustRadius = new Float32Array(dustCount);
+const dustDrift = new Float32Array(dustCount);
+for (let i = 0; i < dustCount; i++) {
+  dustPhase[i] = Math.random() * Math.PI * 2;
+  dustRadius[i] = VIS.hero.dustOrbitRadius * (0.6 + Math.random() * 0.9);
+  dustDrift[i] = (Math.random() - 0.5) * 0.0025;
+}
+const dustGeo = new THREE.BufferGeometry();
+dustGeo.setAttribute('position', new THREE.BufferAttribute(dustPos, 3));
+dustGeo.setAttribute('color', new THREE.BufferAttribute(dustCol, 3));
+const dust = new THREE.Points(dustGeo, new THREE.PointsMaterial({
+  size:0.015,
+  vertexColors:true,
+  transparent:true,
+  opacity:0.34,
+  blending:THREE.AdditiveBlending,
+  depthWrite:false,
+  sizeAttenuation:true
+}));
+scene.add(dust);
 
 function spawnMist(xNorm, zNorm, amount, hue) {
   if (amount < 0.085) return;
@@ -598,7 +708,9 @@ function updateField(dt) {
 
   phraseBreath += dt * (0.7 + clamp((smoothedLoudness + 55) / 26, 0, 1) * 0.8);
   notePulse *= VIS.hero.pulseDecay;
-  noteChangeFlash *= 0.92;
+  noteChangeFlash *= VIS.hero.noteFlashDecay;
+  shockwave *= VIS.hero.shockwaveDecay;
+  shockwavePhase += dt * (3.2 + heroEnergy * 2.4);
   attackEnergy *= 0.90;
 }
 
@@ -643,6 +755,33 @@ function updateShimmer(dt) {
   shimmerGeo.attributes.color.needsUpdate = true;
 }
 
+
+function updateDust(dt, spineX, spineY, spineZ, brightNorm) {
+  const orbitRate = 0.36 + heroConfidence * 0.72 + heroBreath * 0.45;
+  const orbitRadius = VIS.hero.dustOrbitRadius + heroEnergy * 0.10;
+  const swirl = 0.012 + heroAir * 0.026;
+  for (let i = 0; i < dustCount; i++) {
+    const base = i * 3;
+    dustPhase[i] += dt * (orbitRate + i * 0.0008);
+    const radius = dustRadius[i] * (0.82 + heroEnergy * 0.4);
+    const wobble = Math.sin(dustPhase[i] * 1.7 + i * 0.1) * swirl;
+    const angle = dustPhase[i] + i * 0.12;
+    dustPos[base + 0] = spineX + Math.cos(angle) * (radius + wobble) + dustDrift[i] * 40;
+    dustPos[base + 1] = spineY - VIS.hero.dustFieldHeight * 0.5 + Math.sin(angle * 1.4 + shockwavePhase) * 0.06 + (i / dustCount) * VIS.hero.dustFieldHeight;
+    dustPos[base + 2] = spineZ + Math.sin(angle) * (orbitRadius * 0.55 + wobble);
+
+    const spark = clamp(heroEnergy * 0.65 + heroAir * 0.35 + Math.sin(dustPhase[i] * 2.1) * 0.08, 0, 1);
+    const [r,g,b] = hsl2rgb(lerp(192, 210, brightNorm * 0.65 + spark * 0.35), 0.62, 0.48 + spark * 0.24);
+    dustCol[base + 0] = r * (0.22 + spark * 0.62);
+    dustCol[base + 1] = g * (0.26 + spark * 0.68);
+    dustCol[base + 2] = b * (0.30 + spark * 0.74);
+  }
+  dust.material.opacity = 0.10 + heroAir * 0.24 + heroEnergy * 0.18;
+  dust.material.size = 0.011 + heroAir * 0.008 + heroEnergy * 0.004;
+  dustGeo.attributes.position.needsUpdate = true;
+  dustGeo.attributes.color.needsUpdate = true;
+}
+
 function waveColor(heightNorm, crest, xNorm, zNorm) {
   const low = smoothstep(0.00, 0.28, heightNorm);
   const mid = smoothstep(0.22, 0.68, heightNorm);
@@ -665,7 +804,7 @@ function crestColor(crest, brightNorm) {
   return hsl2rgb(hue, sat, light);
 }
 
-function updateGeometry() {
+function updateGeometry(dt) {
   const pitchNorm = smoothedPitchNorm;
   const brightNorm = clamp((Math.log(clamp(smoothedCentroid, 120, 4000)) - Math.log(120)) / (Math.log(4000) - Math.log(120)), 0, 1);
   const loud = clamp((smoothedLoudness + 58) / 34, 0, 1);
@@ -730,21 +869,24 @@ function updateGeometry() {
   crestGeo.computeVertexNormals();
   reflGeo.computeVertexNormals();
 
-  const spineX = (pitchNorm - 0.5) * W;
+  const spineX = (heroPitchLift - 0.5) * W;
   const spineZ = lerp(-D * 0.18, D * 0.28, brightNorm);
-  const spineAmp = 0.18 + loud * 0.32 + noteConfidence * 0.26;
-  const vibrato = vibratoSignal * 0.028;
+  const spineAmp = 0.14 + heroEnergy * 0.38 + heroConfidence * 0.32;
+  const vibrato = heroVibrato * VIS.hero.vibratoDepth;
+  const hoverY = VIS.hero.hoverBase + heroEnergy * VIS.hero.hoverRange + noteStable * 0.12;
+
   for (let i = 0; i < heroCount; i++) {
     const t = i / (heroCount - 1);
     const base = i * 3;
     const s = t * Math.PI * 2;
-    heroPos[base + 0] = spineX + Math.sin(s * 0.72 + phraseBreath * 1.22) * VIS.hero.width * (0.22 + noteConfidence * 0.95) + Math.sin(s * 3.6 + phraseBreath * 2.7) * vibrato;
-    heroPos[base + 1] = 0.06 + t * (0.42 + spineAmp) + Math.sin(s * 1.1 + phraseBreath * 1.4) * 0.026 * (0.35 + noteConfidence * 0.85);
-    heroPos[base + 2] = spineZ + Math.cos(s * 0.95 + phraseBreath * 0.8) * 0.05 * (0.3 + noteConfidence) - (1 - t) * 0.18;
+    const filament = (1 - t) * (0.028 + heroConfidence * 0.03);
+    heroPos[base + 0] = spineX + Math.sin(s * 0.78 + phraseBreath * 1.22) * VIS.hero.width * filament + Math.sin(s * 3.6 + phraseBreath * 2.7) * vibrato;
+    heroPos[base + 1] = 0.04 + t * hoverY + Math.sin(s * 1.1 + phraseBreath * 1.4) * 0.018 * (0.25 + heroConfidence * 0.8);
+    heroPos[base + 2] = spineZ + Math.cos(s * 0.95 + phraseBreath * 0.8) * 0.03 * (0.2 + heroConfidence) - (1 - t) * 0.16;
 
-    const glow = smoothstep(0.2, 1.0, t) * (0.35 + noteConfidence * 0.7 + notePulse * 0.25);
-    const hue = lerp(198, 166, t * 0.4 + brightNorm * 0.6);
-    const [r,g,b] = hsl2rgb(hue, 0.72, 0.44 + glow * 0.2);
+    const glow = smoothstep(0.2, 1.0, t) * (0.26 + heroConfidence * 0.75 + notePulse * 0.18);
+    const hue = lerp(202, 170, t * 0.36 + brightNorm * 0.64);
+    const [r,g,b] = hsl2rgb(hue, 0.72, 0.42 + glow * 0.22);
     heroCol[base + 0] = r * glow;
     heroCol[base + 1] = g * glow;
     heroCol[base + 2] = b * glow;
@@ -752,22 +894,45 @@ function updateGeometry() {
   heroGeo.attributes.position.needsUpdate = true;
   heroGeo.attributes.color.needsUpdate = true;
 
-  heroCore.position.set(spineX, 0.26 + spineAmp * 0.32, spineZ - 0.02);
-  const coreScale = 0.85 + noteConfidence * 0.6 + notePulse * 0.5;
-  heroCore.scale.set(coreScale, coreScale * (0.85 + noteStable * 0.35), coreScale);
-  heroCore.material.opacity = 0.20 + noteConfidence * 0.45 + notePulse * 0.18;
+  const coreY = hoverY;
+  heroCore.position.set(spineX, coreY, spineZ - 0.02);
+  const coreScale = VIS.hero.idleFloor + 0.80 + heroEnergy * 0.56 + notePulse * 0.30;
+  heroCore.scale.set(coreScale, coreScale * (0.9 + noteStable * 0.22), coreScale);
+  heroCore.material.opacity = 0.16 + heroConfidence * 0.52 + notePulse * 0.12;
+
+  heroInnerCore.position.copy(heroCore.position);
+  const innerScale = 0.68 + heroConfidence * 0.26 + notePulse * 0.08;
+  heroInnerCore.scale.set(innerScale, innerScale, innerScale);
+  heroInnerCore.material.opacity = 0.30 + heroConfidence * 0.45 + noteChangeFlash * 0.10;
+
+  heroHalo.position.copy(heroCore.position);
+  const haloScale = 1.0 + heroEnergy * 1.06 + transientAccent * 0.26;
+  heroHalo.scale.set(haloScale, haloScale * (0.90 + noteStable * 0.18), haloScale);
+  heroHalo.material.opacity = VIS.hero.haloBase + heroEnergy * VIS.hero.haloBoost + noteChangeFlash * 0.08;
 
   pulseRing.position.set(spineX, 0.03, spineZ);
-  const ringScale = 0.8 + (1 - notePulse) * 0.9 + transientAccent * 0.16;
+  const ringScale = 0.84 + (1 - notePulse) * 0.82 + transientAccent * 0.18;
   pulseRing.scale.set(ringScale, ringScale, ringScale);
-  pulseRing.material.opacity = 0.11 + notePulse * 0.30 + noteChangeFlash * 0.16;
+  pulseRing.material.opacity = 0.08 + notePulse * 0.26 + noteChangeFlash * 0.15;
 
-  heroLight.position.set(spineX * 0.78, 0.58 + noteConfidence * 0.34, spineZ + 0.22);
-  heroLight.intensity = 0.14 + noteConfidence * 0.72 + notePulse * 0.46;
-  heroLight.color.setHSL(0.53 - brightNorm * 0.07, 0.78, 0.62);
+  contactRing.position.set(spineX, 0.015, spineZ);
+  const shock = 0.9 + (1 - shockwave) * 1.7 + transientAccent * 0.22;
+  contactRing.scale.set(shock, shock, shock);
+  contactRing.material.opacity = 0.04 + shockwave * 0.30 + heroConfidence * 0.08;
+
+  heroLight.position.set(spineX * 0.78, coreY + 0.20, spineZ + 0.22);
+  heroLight.intensity = 0.08 + heroEnergy * 0.88 + notePulse * 0.28;
+  heroLight.distance = 4.2 + heroEnergy * 1.8;
+  heroLight.color.setHSL(0.53 - brightNorm * 0.07, 0.78, 0.60 + heroEnergy * 0.06);
+
+  underGlow.position.set(spineX * 0.34, -0.18, spineZ * 0.62);
+  underGlow.intensity = 0.15 + heroEnergy * 0.42;
 
   const shimmerPitch = clamp(pitchNorm + (Math.random() - 0.5) * 0.08, 0, 1);
-  spawnShimmer(shimmerPitch, lerp(0.58, 0.88, brightNorm), transientAccent * 0.7 + notePulse * 0.45 + noteConfidence * 0.25);
+  const airyBoost = heroAir * 0.38;
+  spawnShimmer(shimmerPitch, lerp(0.58, 0.88, brightNorm), transientAccent * 0.52 + notePulse * 0.32 + heroConfidence * 0.22 + airyBoost);
+  spawnMist(shimmerPitch, lerp(0.46, 0.72, brightNorm), heroAir * 0.42 + heroBreath * 0.25, 196);
+  updateDust(dt, spineX, coreY, spineZ, brightNorm);
 }
 
 const elNote   = document.getElementById('v-note');
@@ -820,7 +985,8 @@ function animate(now) {
   lastTime = now;
 
   updateField(dt);
-  updateGeometry();
+  deriveHeroState(dt);
+  updateGeometry(dt);
   updateMist(dt);
   updateShimmer(dt);
 
