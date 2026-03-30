@@ -6,16 +6,25 @@
 * { margin:0; padding:0; box-sizing:border-box; }
 html, body { width:100%; height:100%; overflow:hidden; background:#040913; }
 #c { display:block; }
+body::before{
+  content:'';
+  position:absolute; inset:0; pointer-events:none;
+  background:
+    radial-gradient(68% 52% at 50% 58%, rgba(57,108,170,0.12), transparent 62%),
+    radial-gradient(36% 28% at 50% 43%, rgba(165,220,255,0.09), transparent 70%),
+    linear-gradient(180deg, rgba(2,6,14,0.04), rgba(2,6,14,0.30));
+  mix-blend-mode:screen;
+}
 
 #info {
   position:absolute; top:16px; right:16px;
-  background:linear-gradient(160deg, rgba(18,27,49,0.70), rgba(9,17,34,0.60));
-  border:1px solid rgba(140,205,255,0.20);
+  background:linear-gradient(160deg, rgba(17,29,53,0.72), rgba(9,17,34,0.66));
+  border:1px solid rgba(148,212,255,0.24);
   border-radius:18px; padding:18px 22px 18px 18px;
   font-family:'Segoe UI','SF Pro Text',sans-serif;
   min-width:230px; pointer-events:none;
-  backdrop-filter:blur(16px) saturate(125%);
-  box-shadow:0 18px 56px rgba(0,0,0,.32), inset 0 1px 0 rgba(255,255,255,.04);
+  backdrop-filter:blur(18px) saturate(128%);
+  box-shadow:0 22px 56px rgba(0,0,0,.36), 0 0 32px rgba(68,132,193,0.10), inset 0 1px 0 rgba(255,255,255,.05);
 }
 #info table { border-collapse:collapse; width:100%; }
 #info td { padding:6px 0; }
@@ -44,10 +53,10 @@ html, body { width:100%; height:100%; overflow:hidden; background:#040913; }
   position:absolute; left:50%; transform:translateX(-50%); top:16px;
   display:flex; gap:10px; align-items:center;
   padding:8px 12px; border-radius:16px;
-  border:1px solid rgba(148,198,238,0.18);
-  background:linear-gradient(165deg, rgba(16,27,50,0.62), rgba(10,17,32,0.58));
+  border:1px solid rgba(156,208,248,0.20);
+  background:linear-gradient(165deg, rgba(18,30,56,0.66), rgba(10,18,36,0.62));
   backdrop-filter:blur(12px) saturate(120%);
-  box-shadow:0 10px 28px rgba(0,0,0,.24), inset 0 1px 0 rgba(255,255,255,.04);
+  box-shadow:0 12px 28px rgba(0,0,0,.28), 0 0 28px rgba(79,140,198,0.10), inset 0 1px 0 rgba(255,255,255,.04);
   pointer-events:none;
 }
 .chip {
@@ -63,6 +72,20 @@ html, body { width:100%; height:100%; overflow:hidden; background:#040913; }
   border-color:rgba(205,236,255,0.34);
   background:linear-gradient(160deg, rgba(80,143,196,0.30), rgba(52,106,156,0.22));
   box-shadow:0 0 18px rgba(101,181,242,0.16);
+}
+
+#hero-label{
+  position:absolute; left:50%; bottom:14%;
+  transform:translateX(-50%);
+  font-family:'Segoe UI','SF Pro Text',sans-serif;
+  font-size:11px; letter-spacing:.75px; text-transform:uppercase;
+  color:rgba(214,233,255,0.68);
+  border:1px solid rgba(140,206,255,0.22);
+  border-radius:999px; padding:8px 14px;
+  background:linear-gradient(165deg, rgba(14,26,47,0.56), rgba(8,15,29,0.44));
+  backdrop-filter:blur(10px) saturate(120%);
+  box-shadow:0 8px 24px rgba(0,0,0,.28), 0 0 26px rgba(90,168,236,0.08);
+  pointer-events:none;
 }
 
 </style>
@@ -90,6 +113,7 @@ html, body { width:100%; height:100%; overflow:hidden; background:#040913; }
 <div class="ax" id="ax-left">Pitch field →</div>
 <div class="ax" id="ax-right">← Brighter / richer →</div>
 <div class="ax" id="ax-depth">Brightness / resonance</div>
+<div id="hero-label">Lead Resonance Spine</div>
 <div id="tag">
   <div class="line"><b>Resonance ocean:</b> fixed acoustic field</div>
   <div class="line"><b>Living swells:</b> pitch and loudness shape the sea</div>
@@ -135,6 +159,13 @@ const VIS = {
     baseSize: 0.028,
     baseOpacity: 0.30,
     heroRate: 0.06,
+    shimmerSize: 0.017,
+    shimmerOpacity: 0.46,
+  },
+  hero: {
+    lineSegments: 96,
+    width: 0.075,
+    pulseDecay: 0.90,
   },
   palette: {
     bg: 0x040913,
@@ -165,7 +196,16 @@ let smoothedLoudness = -80;
 let attackEnergy = 0;
 let ambientPhase = 0;
 let wsReady = false;
-let pendingImpulse = false;
+let smoothedPitchNorm = 0.5;
+let noteStable = 0;
+let noteConfidence = 0;
+let notePulse = 0;
+let phraseBreath = 0;
+let vibratoSignal = 0;
+let transientAccent = 0;
+let lastPitchNorm = 0.5;
+let lastNoteName = '—';
+let noteChangeFlash = 0;
 
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 function lerp(a,b,t){ return a + (b-a)*t; }
@@ -224,6 +264,20 @@ function ingestAudioFrame(d) {
   smoothedPitch = lerp(smoothedPitch, targetPitch, 0.18);
   smoothedCentroid = lerp(smoothedCentroid, audioState.centroid, 0.12);
   smoothedLoudness = lerp(smoothedLoudness, audioState.loudness, 0.15);
+  smoothedPitchNorm = lerp(smoothedPitchNorm, mapLogFreqToUnit(targetPitch), 0.2);
+
+  const hasNote = !!d.note && d.note !== '—';
+  if (hasNote && d.note !== lastNoteName) {
+    notePulse = 1.0;
+    noteChangeFlash = 1.0;
+    lastNoteName = d.note;
+  }
+  const pitchDelta = Math.abs(smoothedPitchNorm - lastPitchNorm);
+  transientAccent = lerp(transientAccent, clamp(attackEnergy * 0.95 + pitchDelta * 5.8, 0, 1), 0.42);
+  noteStable = lerp(noteStable, clamp(1 - pitchDelta * 9.2, 0, 1), hasNote ? 0.12 : 0.24);
+  noteConfidence = lerp(noteConfidence, hasNote ? clamp(0.38 + noteStable * 0.62, 0, 1) : 0, 0.14);
+  vibratoSignal = lerp(vibratoSignal, clamp(pitchDelta * 18, 0, 1), 0.4);
+  lastPitchNorm = smoothedPitchNorm;
 }
 
 const canvas = document.getElementById('c');
@@ -252,7 +306,7 @@ controls.update();
 
 const composer = new THREE.EffectComposer(renderer);
 composer.addPass(new THREE.RenderPass(scene, camera));
-const bloomPass = new THREE.UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.24, 0.86, 0.90);
+const bloomPass = new THREE.UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.34, 0.82, 0.86);
 composer.addPass(bloomPass);
 
 scene.add(new THREE.AmbientLight(0x7ea4d3, 0.28));
@@ -260,6 +314,7 @@ scene.add(new THREE.HemisphereLight(0x6fb2de, 0x050a15, 0.24));
 const rim = new THREE.PointLight(0x6dd9ff, 0.58, 7.8, 1.9); rim.position.set(-1.3, 2.4, 2.0); scene.add(rim);
 const warm = new THREE.PointLight(0xffcf8a, 0.34, 5.8, 2.1); warm.position.set(1.6, 1.45, -0.6); scene.add(warm);
 const underGlow = new THREE.PointLight(0x2a9bb6, 0.22, 4.2, 1.8); underGlow.position.set(0.0, -0.22, 0.08); scene.add(underGlow);
+const heroLight = new THREE.PointLight(0xa4e2ff, 0.0, 4.5, 1.6); heroLight.position.set(0, 0.6, 0.2); scene.add(heroLight);
 
 const floorGeo = new THREE.PlaneGeometry(W + 1.65, D + 1.55);
 floorGeo.rotateX(-Math.PI / 2);
@@ -352,6 +407,70 @@ const mist = new THREE.Points(mistGeo, new THREE.PointsMaterial({
 }));
 scene.add(mist);
 
+const heroCount = VIS.hero.lineSegments;
+const heroPos = new Float32Array(heroCount * 3);
+const heroCol = new Float32Array(heroCount * 3);
+const heroGeo = new THREE.BufferGeometry();
+heroGeo.setAttribute('position', new THREE.BufferAttribute(heroPos, 3));
+heroGeo.setAttribute('color', new THREE.BufferAttribute(heroCol, 3));
+const heroLine = new THREE.Line(
+  heroGeo,
+  new THREE.LineBasicMaterial({
+    vertexColors:true,
+    transparent:true,
+    opacity:0.96,
+    blending:THREE.AdditiveBlending,
+    depthWrite:false,
+  })
+);
+scene.add(heroLine);
+
+const heroCore = new THREE.Mesh(
+  new THREE.SphereGeometry(0.075, 26, 26),
+  new THREE.MeshBasicMaterial({
+    color:0xa8e6ff,
+    transparent:true,
+    opacity:0.55,
+    blending:THREE.AdditiveBlending,
+    depthWrite:false
+  })
+);
+scene.add(heroCore);
+
+const pulseRing = new THREE.Mesh(
+  new THREE.RingGeometry(0.11, 0.145, 64),
+  new THREE.MeshBasicMaterial({
+    color:0xbbe7ff,
+    transparent:true,
+    opacity:0.0,
+    blending:THREE.AdditiveBlending,
+    depthWrite:false,
+    side:THREE.DoubleSide
+  })
+);
+pulseRing.rotation.x = -Math.PI / 2;
+scene.add(pulseRing);
+
+const shimmerCount = 180;
+const shimmerPos = new Float32Array(shimmerCount * 3);
+const shimmerCol = new Float32Array(shimmerCount * 3);
+const shimmerLife = new Float32Array(shimmerCount);
+const shimmerVel = new Float32Array(shimmerCount * 3);
+for (let i = 0; i < shimmerCount; i++) shimmerLife[i] = 0;
+const shimmerGeo = new THREE.BufferGeometry();
+shimmerGeo.setAttribute('position', new THREE.BufferAttribute(shimmerPos, 3));
+shimmerGeo.setAttribute('color', new THREE.BufferAttribute(shimmerCol, 3));
+const shimmer = new THREE.Points(shimmerGeo, new THREE.PointsMaterial({
+  size:VIS.particles.shimmerSize,
+  vertexColors:true,
+  transparent:true,
+  opacity:VIS.particles.shimmerOpacity,
+  blending:THREE.AdditiveBlending,
+  depthWrite:false,
+  sizeAttenuation:true
+}));
+scene.add(shimmer);
+
 function spawnMist(xNorm, zNorm, amount, hue) {
   if (amount < 0.085) return;
   const count = Math.min(mistCount, 4 + Math.floor(amount * 34));
@@ -377,7 +496,7 @@ function spawnMist(xNorm, zNorm, amount, hue) {
 }
 
 function injectImpulse() {
-  const pitchNorm = mapLogFreqToUnit(smoothedPitch);
+  const pitchNorm = smoothedPitchNorm;
   const brightNorm = clamp((Math.log(clamp(smoothedCentroid, 120, 4000)) - Math.log(120)) / (Math.log(4000) - Math.log(120)), 0, 1);
   const loud = clamp((smoothedLoudness + 58) / 34, 0, 1);
   const spread = clamp(audioState.spread || 0.45, 0.18, 1.35);
@@ -414,9 +533,31 @@ function injectImpulse() {
     }
   }
 
-  if (attackEnergy > 0.09) {
+  if (attackEnergy > 0.09 || notePulse > 0.4) {
     const crestHue = lerp(42, 56, brightNorm * 0.45 + loud * 0.55);
-    spawnMist(pitchNorm, lerp(0.28, 0.8, brightNorm), attackEnergy * 0.7, crestHue);
+    spawnMist(pitchNorm, lerp(0.28, 0.8, brightNorm), attackEnergy * 0.7 + notePulse * 0.22, crestHue);
+  }
+}
+
+function spawnShimmer(xNorm, zNorm, amount) {
+  if (amount < 0.16) return;
+  const count = Math.min(shimmerCount, 2 + Math.floor(amount * 16));
+  const x0 = (xNorm - 0.5) * W;
+  const z0 = (zNorm - 0.5) * D;
+  for (let n = 0; n < count; n++) {
+    const i = Math.floor(Math.random() * shimmerCount);
+    const base = i * 3;
+    shimmerPos[base + 0] = x0 + (Math.random() - 0.5) * 0.34;
+    shimmerPos[base + 1] = 0.56 + Math.random() * 0.32;
+    shimmerPos[base + 2] = z0 + (Math.random() - 0.5) * 0.30;
+    shimmerVel[base + 0] = (Math.random() - 0.5) * 0.0016;
+    shimmerVel[base + 1] = 0.0016 + Math.random() * 0.0020;
+    shimmerVel[base + 2] = (Math.random() - 0.5) * 0.0018;
+    shimmerLife[i] = 0.45 + Math.random() * 1.0 + amount * 0.45;
+    const [r,g,b] = hsl2rgb(lerp(190, 212, Math.random()), 0.76, 0.72);
+    shimmerCol[base + 0] = r;
+    shimmerCol[base + 1] = g;
+    shimmerCol[base + 2] = b;
   }
 }
 
@@ -455,6 +596,9 @@ function updateField(dt) {
   diffuseStep(scratch, scratch2, VIS.motion.diffuseB);
   for (let i = 0; i < FIELD_SIZE; i++) field[i] = scratch2[i];
 
+  phraseBreath += dt * (0.7 + clamp((smoothedLoudness + 55) / 26, 0, 1) * 0.8);
+  notePulse *= VIS.hero.pulseDecay;
+  noteChangeFlash *= 0.92;
   attackEnergy *= 0.90;
 }
 
@@ -480,6 +624,25 @@ function updateMist(dt) {
   mistGeo.attributes.color.needsUpdate = true;
 }
 
+function updateShimmer(dt) {
+  for (let i = 0; i < shimmerCount; i++) {
+    if (shimmerLife[i] <= 0) continue;
+    shimmerLife[i] -= dt * (0.78 + Math.random() * 0.32);
+    const base = i * 3;
+    shimmerPos[base + 0] += shimmerVel[base + 0] * (1 + transientAccent * 0.35);
+    shimmerPos[base + 1] += shimmerVel[base + 1] * (1 + noteConfidence * 0.4);
+    shimmerPos[base + 2] += shimmerVel[base + 2];
+    shimmerVel[base + 1] += 0.00003;
+    shimmerVel[base + 1] *= 0.992;
+    shimmerCol[base + 0] *= 0.998;
+    shimmerCol[base + 1] *= 0.998;
+    shimmerCol[base + 2] *= 0.999;
+    if (shimmerLife[i] <= 0) shimmerPos[base + 1] = -99;
+  }
+  shimmerGeo.attributes.position.needsUpdate = true;
+  shimmerGeo.attributes.color.needsUpdate = true;
+}
+
 function waveColor(heightNorm, crest, xNorm, zNorm) {
   const low = smoothstep(0.00, 0.28, heightNorm);
   const mid = smoothstep(0.22, 0.68, heightNorm);
@@ -503,7 +666,7 @@ function crestColor(crest, brightNorm) {
 }
 
 function updateGeometry() {
-  const pitchNorm = mapLogFreqToUnit(smoothedPitch);
+  const pitchNorm = smoothedPitchNorm;
   const brightNorm = clamp((Math.log(clamp(smoothedCentroid, 120, 4000)) - Math.log(120)) / (Math.log(4000) - Math.log(120)), 0, 1);
   const loud = clamp((smoothedLoudness + 58) / 34, 0, 1);
 
@@ -531,7 +694,7 @@ function updateGeometry() {
       const cMask = smoothstep(0.032, 0.098, slope + shaped * 0.24 + ridgeIntent * VIS.wave.ridgeWeight) * smoothstep(0.18, 0.68, hNorm);
       crestMask[i] = lerp(crestMask[i], cMask, VIS.wave.crestInertia);
 
-      const bodyY = Math.pow(hNorm, 1.03) * (H * 0.89) + Math.sin((xNorm * 4.2 + zNorm * 2.0 + ambientPhase) * 1.02) * 0.006 * loud;
+      const bodyY = Math.pow(hNorm, 1.03) * (H * 0.89) + Math.sin((xNorm * 4.2 + zNorm * 2.0 + ambientPhase) * 1.02) * 0.006 * loud + Math.sin(phraseBreath * 0.9 + zNorm * 5.5) * 0.003 * noteConfidence;
       bodyPos[vi + 1] = lerp(bodyPos[vi + 1], bodyY, VIS.wave.bodyInertia);
       const ridgeLift = Math.pow(clamp(ridgeBand * hNorm * 1.1, 0, 1), 1.1) * VIS.wave.crestLift;
       crestPos[vi + 1] = bodyPos[vi + 1] + 0.008 + crestMask[i] * 0.022 + ridgeLift;
@@ -545,7 +708,7 @@ function updateGeometry() {
 
       const [cr, cg, cb] = crestColor(crestMask[i], brightNorm * 0.68 + zNorm * 0.32);
       const fresnelHint = smoothstep(0.20, 0.95, zNorm) * 0.16;
-      const crestAmp = smoothstep(0.16, 0.56, crestMask[i]) * (0.16 + loud * 0.15 + fresnelHint);
+      const crestAmp = smoothstep(0.16, 0.56, crestMask[i]) * (0.16 + loud * 0.15 + fresnelHint + transientAccent * 0.13);
       crestCol[vi + 0] = cr * crestAmp;
       crestCol[vi + 1] = cg * crestAmp;
       crestCol[vi + 2] = cb * crestAmp;
@@ -566,6 +729,45 @@ function updateGeometry() {
   planeGeo.computeVertexNormals();
   crestGeo.computeVertexNormals();
   reflGeo.computeVertexNormals();
+
+  const spineX = (pitchNorm - 0.5) * W;
+  const spineZ = lerp(-D * 0.18, D * 0.28, brightNorm);
+  const spineAmp = 0.18 + loud * 0.32 + noteConfidence * 0.26;
+  const vibrato = vibratoSignal * 0.028;
+  for (let i = 0; i < heroCount; i++) {
+    const t = i / (heroCount - 1);
+    const base = i * 3;
+    const s = t * Math.PI * 2;
+    heroPos[base + 0] = spineX + Math.sin(s * 0.72 + phraseBreath * 1.22) * VIS.hero.width * (0.22 + noteConfidence * 0.95) + Math.sin(s * 3.6 + phraseBreath * 2.7) * vibrato;
+    heroPos[base + 1] = 0.06 + t * (0.42 + spineAmp) + Math.sin(s * 1.1 + phraseBreath * 1.4) * 0.026 * (0.35 + noteConfidence * 0.85);
+    heroPos[base + 2] = spineZ + Math.cos(s * 0.95 + phraseBreath * 0.8) * 0.05 * (0.3 + noteConfidence) - (1 - t) * 0.18;
+
+    const glow = smoothstep(0.2, 1.0, t) * (0.35 + noteConfidence * 0.7 + notePulse * 0.25);
+    const hue = lerp(198, 166, t * 0.4 + brightNorm * 0.6);
+    const [r,g,b] = hsl2rgb(hue, 0.72, 0.44 + glow * 0.2);
+    heroCol[base + 0] = r * glow;
+    heroCol[base + 1] = g * glow;
+    heroCol[base + 2] = b * glow;
+  }
+  heroGeo.attributes.position.needsUpdate = true;
+  heroGeo.attributes.color.needsUpdate = true;
+
+  heroCore.position.set(spineX, 0.26 + spineAmp * 0.32, spineZ - 0.02);
+  const coreScale = 0.85 + noteConfidence * 0.6 + notePulse * 0.5;
+  heroCore.scale.set(coreScale, coreScale * (0.85 + noteStable * 0.35), coreScale);
+  heroCore.material.opacity = 0.20 + noteConfidence * 0.45 + notePulse * 0.18;
+
+  pulseRing.position.set(spineX, 0.03, spineZ);
+  const ringScale = 0.8 + (1 - notePulse) * 0.9 + transientAccent * 0.16;
+  pulseRing.scale.set(ringScale, ringScale, ringScale);
+  pulseRing.material.opacity = 0.11 + notePulse * 0.30 + noteChangeFlash * 0.16;
+
+  heroLight.position.set(spineX * 0.78, 0.58 + noteConfidence * 0.34, spineZ + 0.22);
+  heroLight.intensity = 0.14 + noteConfidence * 0.72 + notePulse * 0.46;
+  heroLight.color.setHSL(0.53 - brightNorm * 0.07, 0.78, 0.62);
+
+  const shimmerPitch = clamp(pitchNorm + (Math.random() - 0.5) * 0.08, 0, 1);
+  spawnShimmer(shimmerPitch, lerp(0.58, 0.88, brightNorm), transientAccent * 0.7 + notePulse * 0.45 + noteConfidence * 0.25);
 }
 
 const elNote   = document.getElementById('v-note');
@@ -581,6 +783,7 @@ function updateOverlay(d) {
   elVol.style.color = db > -18 ? '#f7d089' : db > -42 ? '#95e1c2' : '#89c1f0';
   elTimbre.textContent = d.timbre || '—';
   elRange.textContent = d.range || '—';
+  elNote.style.textShadow = `0 0 ${12 + noteConfidence * 20}px rgba(146,216,255,${0.18 + notePulse * 0.16})`;
 }
 
 const dot = document.getElementById('dot');
@@ -619,12 +822,18 @@ function animate(now) {
   updateField(dt);
   updateGeometry();
   updateMist(dt);
+  updateShimmer(dt);
 
   const idle = wsReady ? 1 : 0.6;
-  camera.position.x = lerp(camera.position.x, 2.26 + Math.sin(now * 0.00010) * 0.055 * idle, 0.010);
-  camera.position.y = lerp(camera.position.y, 1.72 + Math.cos(now * 0.00015) * 0.030 * idle, 0.010);
-  controls.target.x = lerp(controls.target.x, 0.04 + Math.sin(now * 0.00009) * 0.028, 0.008);
-  controls.target.z = lerp(controls.target.z, 0.08 + Math.cos(now * 0.00011) * 0.024, 0.008);
+  const cameraMusic = noteConfidence * 0.24 + transientAccent * 0.16;
+  camera.position.x = lerp(camera.position.x, 2.24 + Math.sin(now * 0.00010) * 0.052 * idle + Math.sin(phraseBreath * 0.42) * 0.05 * cameraMusic, 0.010);
+  camera.position.y = lerp(camera.position.y, 1.72 + Math.cos(now * 0.00015) * 0.030 * idle + Math.cos(phraseBreath * 0.6) * 0.028 * cameraMusic, 0.010);
+  controls.target.x = lerp(controls.target.x, 0.04 + Math.sin(now * 0.00009) * 0.028 + (smoothedPitchNorm - 0.5) * 0.18, 0.008);
+  controls.target.z = lerp(controls.target.z, 0.08 + Math.cos(now * 0.00011) * 0.024 + (noteConfidence - 0.5) * 0.08, 0.008);
+
+  bloomPass.strength = lerp(bloomPass.strength, 0.26 + noteConfidence * 0.34 + transientAccent * 0.22, 0.08);
+  bloomPass.radius = lerp(bloomPass.radius, 0.80 + noteConfidence * 0.18, 0.08);
+  bloomPass.threshold = lerp(bloomPass.threshold, 0.87 - notePulse * 0.08, 0.08);
   controls.update();
   composer.render();
 }
