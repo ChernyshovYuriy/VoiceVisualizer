@@ -4,24 +4,24 @@
 <meta charset="utf-8">
 <style>
 * { margin:0; padding:0; box-sizing:border-box; }
-html, body { width:100%; height:100%; overflow:hidden; background:#07111b; }
+html, body { width:100%; height:100%; overflow:hidden; background:#040913; }
 #c { display:block; }
 
 #info {
   position:absolute; top:16px; right:16px;
-  background:rgba(10,18,34,0.68);
-  border:1px solid rgba(116,205,255,0.22);
-  border-radius:16px; padding:18px 22px 18px 18px;
+  background:linear-gradient(160deg, rgba(18,27,49,0.70), rgba(9,17,34,0.60));
+  border:1px solid rgba(140,205,255,0.20);
+  border-radius:18px; padding:18px 22px 18px 18px;
   font-family:'Segoe UI','SF Pro Text',sans-serif;
-  min-width:218px; pointer-events:none;
-  backdrop-filter:blur(14px);
-  box-shadow:0 18px 56px rgba(0,0,0,.28), inset 0 1px 0 rgba(255,255,255,.03);
+  min-width:230px; pointer-events:none;
+  backdrop-filter:blur(16px) saturate(125%);
+  box-shadow:0 18px 56px rgba(0,0,0,.32), inset 0 1px 0 rgba(255,255,255,.04);
 }
 #info table { border-collapse:collapse; width:100%; }
-#info td { padding:5px 0; }
-.lbl { color:rgba(177,208,238,0.72); font-size:12px; padding-right:18px; white-space:nowrap; }
-.val { color:#eef6ff; font-size:15px; font-weight:600; text-shadow:0 0 10px rgba(115,195,255,.08); }
-.val.big { font-size:28px; font-weight:700; color:#f4fbff; letter-spacing:-0.4px; text-shadow:0 0 18px rgba(150,235,255,.10); }
+#info td { padding:6px 0; }
+.lbl { color:rgba(176,202,231,0.58); font-size:11px; letter-spacing:.45px; text-transform:uppercase; padding-right:18px; white-space:nowrap; }
+.val { color:#eaf4ff; font-size:15px; font-weight:600; text-shadow:0 0 10px rgba(115,195,255,.06); }
+.val.big { font-size:30px; font-weight:700; color:#f4fbff; letter-spacing:-0.5px; text-shadow:0 0 18px rgba(150,235,255,.12); }
 
 .ax {
   position:absolute;
@@ -34,15 +34,47 @@ html, body { width:100%; height:100%; overflow:hidden; background:#07111b; }
 #ax-right  { bottom:14px; right:8.8%; }
 #ax-depth  { right:9px; top:48%; transform:rotate(90deg); }
 #ax-note   { bottom:37%; left:10px; }
-#tag       { top:18px; left:18px; border:1px solid rgba(116,205,255,0.20); border-radius:16px; padding:14px 18px; background:rgba(10,18,34,0.50); backdrop-filter:blur(12px); box-shadow:0 12px 34px rgba(0,0,0,.22); }
-#tag .line { color:rgba(228,239,255,0.82); font-family:'Segoe UI',sans-serif; font-size:12px; line-height:1.55; letter-spacing:.2px; }
-#tag b { color:#ffd88c; font-weight:700; }
+#tag       { top:18px; left:18px; border:1px solid rgba(132,196,255,0.18); border-radius:18px; padding:14px 18px; background:linear-gradient(160deg, rgba(14,24,42,0.66), rgba(9,15,30,0.56)); backdrop-filter:blur(13px) saturate(120%); box-shadow:0 14px 36px rgba(0,0,0,.26); }
+#tag .line { color:rgba(225,237,255,0.80); font-family:'Segoe UI',sans-serif; font-size:12px; line-height:1.58; letter-spacing:.22px; }
+#tag b { color:#f3d99a; font-weight:700; }
 #dot { position:absolute; top:12px; left:12px; width:8px; height:8px; border-radius:50%; background:#2b3645; transition:background .4s ease, box-shadow .4s ease; }
 #dot.on { background:#3fb950; box-shadow:0 0 10px rgba(63,185,80,.55); }
+
+#toolbar {
+  position:absolute; left:50%; transform:translateX(-50%); top:16px;
+  display:flex; gap:10px; align-items:center;
+  padding:8px 12px; border-radius:16px;
+  border:1px solid rgba(148,198,238,0.18);
+  background:linear-gradient(165deg, rgba(16,27,50,0.62), rgba(10,17,32,0.58));
+  backdrop-filter:blur(12px) saturate(120%);
+  box-shadow:0 10px 28px rgba(0,0,0,.24), inset 0 1px 0 rgba(255,255,255,.04);
+  pointer-events:none;
+}
+.chip {
+  font-family:'Segoe UI','SF Pro Text',sans-serif;
+  color:rgba(192,220,246,0.78);
+  font-size:11px; letter-spacing:.55px; text-transform:uppercase;
+  padding:7px 10px; border-radius:10px;
+  border:1px solid rgba(122,178,227,0.14);
+  background:rgba(27,44,73,0.24);
+}
+.chip.active {
+  color:#ebf7ff;
+  border-color:rgba(205,236,255,0.34);
+  background:linear-gradient(160deg, rgba(80,143,196,0.30), rgba(52,106,156,0.22));
+  box-shadow:0 0 18px rgba(101,181,242,0.16);
+}
+
 </style>
 </head>
 <body>
 <canvas id="c"></canvas>
+
+<div id="toolbar">
+  <div class="chip active">Vocals Resonance</div>
+  <div class="chip">Fixed Plane</div>
+  <div class="chip">Live Crest Mist</div>
+</div>
 
 <div id="info">
   <table>
@@ -81,6 +113,36 @@ const W = 5.0;
 const D = 3.6;
 const H = 1.35;
 const FIELD_SIZE = NX * NZ;
+
+// Tunable polish constants (grouped for quick art-direction tweaks).
+const VIS = {
+  wave: {
+    primarySwell: 1.55,
+    secondarySwell: 0.16,
+    crestLift: 0.046,
+    ridgeWeight: 0.34,
+    edgeFalloff: 2.2,
+    bodyInertia: 0.12,
+    crestInertia: 0.28,
+  },
+  motion: {
+    velocityDamping: 0.954,
+    fieldDamping: 0.983,
+    diffuseA: 0.082,
+    diffuseB: 0.061,
+  },
+  particles: {
+    baseSize: 0.028,
+    baseOpacity: 0.30,
+    heroRate: 0.06,
+  },
+  palette: {
+    bg: 0x040913,
+    fog: 0x071021,
+    floor: 0x0b1626,
+    grid: 0x35506a,
+  },
+};
 
 const field = new Float32Array(FIELD_SIZE);
 const velocity = new Float32Array(FIELD_SIZE);
@@ -171,14 +233,14 @@ renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 0.86;
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x07111c);
-scene.fog = new THREE.FogExp2(0x07111c, 0.042);
+scene.background = new THREE.Color(VIS.palette.bg);
+scene.fog = new THREE.FogExp2(VIS.palette.fog, 0.040);
 
-const camera = new THREE.PerspectiveCamera(37, 1, 0.1, 100);
-camera.position.set(2.55, 1.82, 4.35);
+const camera = new THREE.PerspectiveCamera(35, 1, 0.1, 100);
+camera.position.set(2.34, 1.72, 3.66);
 
 const controls = new THREE.OrbitControls(camera, renderer.domElement);
-controls.target.set(0, 0.34, 0.16);
+controls.target.set(0.04, 0.35, 0.08);
 controls.enableDamping = true;
 controls.dampingFactor = 0.05;
 controls.enablePan = false;
@@ -190,18 +252,19 @@ controls.update();
 
 const composer = new THREE.EffectComposer(renderer);
 composer.addPass(new THREE.RenderPass(scene, camera));
-const bloomPass = new THREE.UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.36, 0.78, 0.82);
+const bloomPass = new THREE.UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.24, 0.86, 0.90);
 composer.addPass(bloomPass);
 
-scene.add(new THREE.AmbientLight(0x89bfff, 0.34));
-scene.add(new THREE.HemisphereLight(0x78cfff, 0x07111c, 0.20));
-const rim = new THREE.PointLight(0x67d8ff, 0.72, 8.5, 1.9); rim.position.set(-1.7, 2.5, 2.8); scene.add(rim);
-const warm = new THREE.PointLight(0xffd28a, 0.46, 7.2, 2.1); warm.position.set(2.4, 1.7, -1.2); scene.add(warm);
+scene.add(new THREE.AmbientLight(0x7ea4d3, 0.28));
+scene.add(new THREE.HemisphereLight(0x6fb2de, 0x050a15, 0.24));
+const rim = new THREE.PointLight(0x6dd9ff, 0.58, 7.8, 1.9); rim.position.set(-1.3, 2.4, 2.0); scene.add(rim);
+const warm = new THREE.PointLight(0xffcf8a, 0.34, 5.8, 2.1); warm.position.set(1.6, 1.45, -0.6); scene.add(warm);
+const underGlow = new THREE.PointLight(0x2a9bb6, 0.22, 4.2, 1.8); underGlow.position.set(0.0, -0.22, 0.08); scene.add(underGlow);
 
 const floorGeo = new THREE.PlaneGeometry(W + 1.65, D + 1.55);
 floorGeo.rotateX(-Math.PI / 2);
 const floorMat = new THREE.MeshBasicMaterial({
-  color:0x081722, transparent:true, opacity:0.72, side:THREE.DoubleSide, depthWrite:false
+  color:VIS.palette.floor, transparent:true, opacity:0.62, side:THREE.DoubleSide, depthWrite:false
 });
 const floorMesh = new THREE.Mesh(floorGeo, floorMat);
 floorMesh.position.y = -0.06;
@@ -221,7 +284,7 @@ scene.add(floorMesh);
   }
   const g = new THREE.BufferGeometry();
   g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(pts), 3));
-  scene.add(new THREE.LineSegments(g, new THREE.LineBasicMaterial({color:0x1d4762, transparent:true, opacity:0.42})));
+  scene.add(new THREE.LineSegments(g, new THREE.LineBasicMaterial({color:VIS.palette.grid, transparent:true, opacity:0.28})));
 })();
 
 const planeGeo = new THREE.PlaneGeometry(W, D, NX - 1, NZ - 1);
@@ -233,7 +296,7 @@ planeGeo.setAttribute('color', new THREE.BufferAttribute(bodyCol, 3));
 const bodyMat = new THREE.MeshBasicMaterial({
   vertexColors:true,
   transparent:true,
-  opacity:0.78,
+  opacity:0.82,
   side:THREE.DoubleSide,
   depthWrite:false,
 });
@@ -248,7 +311,7 @@ crestGeo.setAttribute('color', new THREE.BufferAttribute(crestCol, 3));
 const crestMat = new THREE.MeshBasicMaterial({
   vertexColors:true,
   transparent:true,
-  opacity:0.26,
+  opacity:0.22,
   side:THREE.DoubleSide,
   blending:THREE.AdditiveBlending,
   depthWrite:false,
@@ -264,7 +327,7 @@ reflGeo.setAttribute('color', new THREE.BufferAttribute(reflCol, 3));
 const reflMat = new THREE.MeshBasicMaterial({
   vertexColors:true,
   transparent:true,
-  opacity:0.10,
+  opacity:0.12,
   side:THREE.DoubleSide,
   blending:THREE.AdditiveBlending,
   depthWrite:false,
@@ -274,7 +337,7 @@ reflMesh.scale.y = -1;
 reflMesh.position.y = -0.108;
 scene.add(reflMesh);
 
-const mistCount = 320;
+const mistCount = 260;
 const mistPos = new Float32Array(mistCount * 3);
 const mistCol = new Float32Array(mistCount * 3);
 const mistLife = new Float32Array(mistCount);
@@ -284,30 +347,31 @@ const mistGeo = new THREE.BufferGeometry();
 mistGeo.setAttribute('position', new THREE.BufferAttribute(mistPos, 3));
 mistGeo.setAttribute('color', new THREE.BufferAttribute(mistCol, 3));
 const mist = new THREE.Points(mistGeo, new THREE.PointsMaterial({
-  size:0.046, vertexColors:true, transparent:true, opacity:0.34,
+  size:VIS.particles.baseSize, vertexColors:true, transparent:true, opacity:VIS.particles.baseOpacity,
   blending:THREE.AdditiveBlending, depthWrite:false, sizeAttenuation:true
 }));
 scene.add(mist);
 
 function spawnMist(xNorm, zNorm, amount, hue) {
-  if (amount < 0.06) return;
-  const count = Math.min(mistCount, 10 + Math.floor(amount * 70));
+  if (amount < 0.085) return;
+  const count = Math.min(mistCount, 4 + Math.floor(amount * 34));
   const x0 = (xNorm - 0.5) * W;
   const z0 = (zNorm - 0.5) * D;
   for (let n = 0; n < count; n++) {
     let i = Math.floor(Math.random() * mistCount);
     const base = i * 3;
-    mistPos[base + 0] = x0 + (Math.random() - 0.5) * 0.42;
-    mistPos[base + 1] = 0.36 + Math.random() * 0.26;
-    mistPos[base + 2] = z0 + (Math.random() - 0.5) * 0.26;
-    mistVel[base + 0] = (Math.random() - 0.5) * 0.005;
-    mistVel[base + 1] = 0.006 + Math.random() * 0.009;
-    mistVel[base + 2] = (Math.random() - 0.5) * 0.003;
-    mistLife[i] = 0.6 + Math.random() * 0.8 + amount * 0.6;
-    const hero = Math.random() < 0.14;
+    mistPos[base + 0] = x0 + (Math.random() - 0.5) * 0.30;
+    mistPos[base + 1] = 0.32 + Math.random() * 0.20;
+    mistPos[base + 2] = z0 + (Math.random() - 0.5) * 0.22;
+    mistVel[base + 0] = (Math.random() - 0.5) * 0.0024;
+    mistVel[base + 1] = 0.004 + Math.random() * 0.006;
+    mistVel[base + 2] = (Math.random() - 0.5) * 0.0018;
+    mistLife[i] = 0.45 + Math.random() * 1.05 + amount * 0.48;
+    const hero = Math.random() < VIS.particles.heroRate;
+    const warmHue = hero ? hue + 26 : hue + 10;
     const [r,g,b] = hero
-      ? hsl2rgb(hue + 14 + (Math.random() - 0.5) * 8, 0.88, 0.72)
-      : hsl2rgb(hue + (Math.random() - 0.5) * 14, 0.82, 0.66);
+      ? hsl2rgb(warmHue + (Math.random() - 0.5) * 16, 0.92, 0.78)
+      : hsl2rgb(warmHue + (Math.random() - 0.5) * 9, 0.80, 0.63);
     mistCol[base+0] = r; mistCol[base+1] = g; mistCol[base+2] = b;
   }
 }
@@ -351,7 +415,7 @@ function injectImpulse() {
   }
 
   if (attackEnergy > 0.09) {
-    const crestHue = lerp(176, 56, brightNorm * 0.65 + loud * 0.35);
+    const crestHue = lerp(42, 56, brightNorm * 0.45 + loud * 0.55);
     spawnMist(pitchNorm, lerp(0.28, 0.8, brightNorm), attackEnergy * 0.7, crestHue);
   }
 }
@@ -380,15 +444,15 @@ function updateField(dt) {
       const slowWave = Math.sin(x * 0.11 + ambientPhase * 0.9) * Math.cos(z * 0.18 - ambientPhase * 0.55);
       velocity[i] += lap * 0.028;
       velocity[i] += slowWave * 0.00028 * (0.2 + clamp((smoothedLoudness + 60) / 35, 0, 1));
-      velocity[i] *= 0.945;
+      velocity[i] *= VIS.motion.velocityDamping;
       field[i] += velocity[i];
-      field[i] *= 0.978;
+      field[i] *= VIS.motion.fieldDamping;
       field[i] = clamp(field[i], -0.08, 0.34);
     }
   }
 
-  diffuseStep(field, scratch, 0.09);
-  diffuseStep(scratch, scratch2, 0.07);
+  diffuseStep(field, scratch, VIS.motion.diffuseA);
+  diffuseStep(scratch, scratch2, VIS.motion.diffuseB);
   for (let i = 0; i < FIELD_SIZE; i++) field[i] = scratch2[i];
 
   attackEnergy *= 0.90;
@@ -397,12 +461,13 @@ function updateField(dt) {
 function updateMist(dt) {
   for (let i = 0; i < mistCount; i++) {
     if (mistLife[i] <= 0) continue;
-    mistLife[i] -= dt * 0.85;
+    mistLife[i] -= dt * (0.54 + Math.random() * 0.35);
     const base = i * 3;
-    mistPos[base + 0] += mistVel[base + 0] * (1 + attackEnergy * 0.9);
-    mistPos[base + 1] += mistVel[base + 1] * (1 + attackEnergy * 0.5);
+    mistPos[base + 0] += mistVel[base + 0] * (1 + attackEnergy * 0.55);
+    mistPos[base + 1] += mistVel[base + 1] * (1 + attackEnergy * 0.34);
     mistPos[base + 2] += mistVel[base + 2];
-    mistVel[base + 1] *= 0.992;
+    mistVel[base + 1] += 0.00005;
+    mistVel[base + 1] *= 0.989;
     const fade = Math.max(0, mistLife[i]);
     mistCol[base + 0] *= 0.997;
     mistCol[base + 1] *= 0.998;
@@ -416,23 +481,24 @@ function updateMist(dt) {
 }
 
 function waveColor(heightNorm, crest, xNorm, zNorm) {
-  const valley = smoothstep(0.00, 0.32, heightNorm);
-  const body = smoothstep(0.18, 0.68, heightNorm);
-  const top = smoothstep(0.56, 1.00, heightNorm);
-  const hue = lerp(228, 186, valley)
-            - body * 10
-            - top * 6
-            + zNorm * 8
-            + Math.sin(xNorm * 5.6 + zNorm * 4.8 + ambientPhase * 0.50) * 4.8;
-  const sat = 0.52 + valley * 0.14 + body * 0.10;
-  const light = 0.085 + valley * 0.05 + body * 0.09 + top * 0.06 + crest * 0.035;
+  const low = smoothstep(0.00, 0.28, heightNorm);
+  const mid = smoothstep(0.22, 0.68, heightNorm);
+  const high = smoothstep(0.58, 1.00, heightNorm);
+  const ridge = Math.pow(smoothstep(0.70, 1.00, heightNorm), 1.5);
+  const hue = lerp(232, 186, low)
+            - mid * 7
+            - high * 3
+            + zNorm * 5
+            + Math.sin(xNorm * 4.9 + zNorm * 4.3 + ambientPhase * 0.42) * 2.8;
+  const sat = 0.46 + low * 0.16 + mid * 0.12;
+  const light = 0.060 + low * 0.06 + mid * 0.11 + high * 0.07 + ridge * 0.05 + crest * 0.022;
   return hsl2rgb(hue, sat, light);
 }
 
 function crestColor(crest, brightNorm) {
-  const hue = lerp(92, 46, brightNorm);
-  const sat = 0.82;
-  const light = 0.24 + crest * 0.28;
+  const hue = lerp(96, 62, brightNorm);
+  const sat = 0.70;
+  const light = 0.20 + crest * 0.22;
   return hsl2rgb(hue, sat, light);
 }
 
@@ -447,23 +513,29 @@ function updateGeometry() {
       const vi = i * 3;
       const xNorm = x / (NX - 1);
       const zNorm = z / (NZ - 1);
-      const lateralBias = 1 - Math.abs(xNorm - pitchNorm) * 1.15;
-      const oceanBias = 0.88 + 0.18 * Math.sin(zNorm * Math.PI);
-      const shaped = Math.max(0, field[i] * oceanBias * Math.max(0.35, lateralBias));
-      const hNorm = Math.pow(clamp(shaped * 1.35, 0, 1.0), 0.92);
+      const lateralDelta = Math.abs(xNorm - pitchNorm);
+      const lateralBias = Math.exp(-Math.pow(lateralDelta * VIS.wave.edgeFalloff, 1.35));
+      const oceanBias = 0.80 + 0.24 * Math.sin(zNorm * Math.PI);
+      const broadSwell = Math.max(0, field[i] * oceanBias * (0.28 + lateralBias * VIS.wave.primarySwell));
+      const ridgeBand = Math.exp(-Math.pow((lateralDelta * 4.2), 2.0));
+      const secondary = VIS.wave.secondarySwell * Math.sin((xNorm * 14.0 + zNorm * 7.2) + ambientPhase * 0.65) * ridgeBand * clamp(broadSwell * 3.0, 0, 1);
+      const shaped = Math.max(0, broadSwell + secondary);
+      const hNorm = Math.pow(clamp(shaped * 1.32, 0, 1.0), 0.90);
 
       const left = field[idx(Math.max(0, x - 1), z)];
       const right = field[idx(Math.min(NX - 1, x + 1), z)];
       const up = field[idx(x, Math.max(0, z - 1))];
       const down = field[idx(x, Math.min(NZ - 1, z + 1))];
       const slope = Math.abs(right - left) + Math.abs(down - up);
-      const cMask = smoothstep(0.035, 0.11, slope + shaped * 0.28) * smoothstep(0.16, 0.62, hNorm);
-      crestMask[i] = lerp(crestMask[i], cMask, 0.35);
+      const ridgeIntent = smoothstep(0.10, 0.62, hNorm) * Math.pow(ridgeBand, 0.8);
+      const cMask = smoothstep(0.032, 0.098, slope + shaped * 0.24 + ridgeIntent * VIS.wave.ridgeWeight) * smoothstep(0.18, 0.68, hNorm);
+      crestMask[i] = lerp(crestMask[i], cMask, VIS.wave.crestInertia);
 
-      const y = Math.pow(hNorm, 1.05) * (H * 0.88) + Math.sin((xNorm * 4.8 + zNorm * 2.3 + ambientPhase) * 1.05) * 0.008 * loud;
-      bodyPos[vi + 1] = y;
-      crestPos[vi + 1] = y + 0.01 + crestMask[i] * 0.028;
-      reflPos[vi + 1] = y;
+      const bodyY = Math.pow(hNorm, 1.03) * (H * 0.89) + Math.sin((xNorm * 4.2 + zNorm * 2.0 + ambientPhase) * 1.02) * 0.006 * loud;
+      bodyPos[vi + 1] = lerp(bodyPos[vi + 1], bodyY, VIS.wave.bodyInertia);
+      const ridgeLift = Math.pow(clamp(ridgeBand * hNorm * 1.1, 0, 1), 1.1) * VIS.wave.crestLift;
+      crestPos[vi + 1] = bodyPos[vi + 1] + 0.008 + crestMask[i] * 0.022 + ridgeLift;
+      reflPos[vi + 1] = bodyPos[vi + 1];
 
       const [br, bg, bb] = waveColor(hNorm, crestMask[i], xNorm, zNorm);
       const depthFade = 0.74 + zNorm * 0.16;
@@ -472,15 +544,16 @@ function updateGeometry() {
       bodyCol[vi + 2] = bb * (0.86 + zNorm * 0.22);
 
       const [cr, cg, cb] = crestColor(crestMask[i], brightNorm * 0.68 + zNorm * 0.32);
-      const crestAmp = smoothstep(0.14, 0.56, crestMask[i]) * (0.22 + loud * 0.18);
+      const fresnelHint = smoothstep(0.20, 0.95, zNorm) * 0.16;
+      const crestAmp = smoothstep(0.16, 0.56, crestMask[i]) * (0.16 + loud * 0.15 + fresnelHint);
       crestCol[vi + 0] = cr * crestAmp;
       crestCol[vi + 1] = cg * crestAmp;
       crestCol[vi + 2] = cb * crestAmp;
 
       const reflFade = 0.36 + zNorm * 0.12;
-      reflCol[vi + 0] = br * 0.22 * reflFade;
-      reflCol[vi + 1] = bg * 0.23 * reflFade;
-      reflCol[vi + 2] = bb * 0.27 * reflFade;
+      reflCol[vi + 0] = br * 0.20 * reflFade;
+      reflCol[vi + 1] = bg * 0.24 * reflFade;
+      reflCol[vi + 2] = bb * 0.30 * reflFade;
     }
   }
 
@@ -505,7 +578,7 @@ function updateOverlay(d) {
   elFreq.textContent = d.pitch ? d.pitch.toFixed(1) + ' Hz' : '— Hz';
   const db = d.loudness ?? -80;
   elVol.textContent = db.toFixed(1) + ' dB';
-  elVol.style.color = db > -18 ? '#ffd47d' : db > -42 ? '#8be6bf' : '#83c7ff';
+  elVol.style.color = db > -18 ? '#f7d089' : db > -42 ? '#95e1c2' : '#89c1f0';
   elTimbre.textContent = d.timbre || '—';
   elRange.textContent = d.range || '—';
 }
@@ -548,10 +621,10 @@ function animate(now) {
   updateMist(dt);
 
   const idle = wsReady ? 1 : 0.6;
-  camera.position.x = lerp(camera.position.x, 2.42 + Math.sin(now * 0.00013) * 0.08 * idle, 0.012);
-  camera.position.y = lerp(camera.position.y, 1.80 + Math.cos(now * 0.00019) * 0.04 * idle, 0.012);
-  controls.target.x = lerp(controls.target.x, Math.sin(now * 0.00011) * 0.04, 0.01);
-  controls.target.z = lerp(controls.target.z, 0.18 + Math.cos(now * 0.00014) * 0.03, 0.01);
+  camera.position.x = lerp(camera.position.x, 2.26 + Math.sin(now * 0.00010) * 0.055 * idle, 0.010);
+  camera.position.y = lerp(camera.position.y, 1.72 + Math.cos(now * 0.00015) * 0.030 * idle, 0.010);
+  controls.target.x = lerp(controls.target.x, 0.04 + Math.sin(now * 0.00009) * 0.028, 0.008);
+  controls.target.z = lerp(controls.target.z, 0.08 + Math.cos(now * 0.00011) * 0.024, 0.008);
   controls.update();
   composer.render();
 }
