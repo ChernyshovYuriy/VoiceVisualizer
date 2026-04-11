@@ -631,5 +631,72 @@ class TestChunkPipelineStress:
         assert np.isfinite(np.array(payload_dict["loudHist"], dtype=np.float32)).all()
 
 
+class TestPreprocessingEdgeCases:
+    """Edge/invalid input behavior for preprocessing before visualization."""
+
+    def test_onset_spike_then_settle_for_repeated_frames(self):
+        buf = RollingBuffer()
+        captured: list[FrameInfo] = []
+        analyzer = Analyzer(buf, on_frame=lambda info: captured.append(info))
+
+        frame = make_vocal_like(f0=260, amplitude=0.35, duration_s=FRAME_LENGTH / SR)[:FRAME_LENGTH]
+        analyzer._process(np.zeros(FRAME_LENGTH, dtype=np.float32))
+        analyzer._process(frame)
+        analyzer._process(frame)
+
+        assert len(captured) == 3
+        assert captured[1].onset > 0.05
+        assert captured[2].onset < captured[1].onset
+
+    def test_invalid_samples_nan_and_inf_are_sanitized(self):
+        buf = RollingBuffer()
+        captured: list[FrameInfo] = []
+        analyzer = Analyzer(buf, on_frame=lambda info: captured.append(info))
+
+        frame = make_vocal_like(f0=300, amplitude=0.25, duration_s=FRAME_LENGTH / SR)[:FRAME_LENGTH]
+        frame = frame.copy()
+        frame[32] = np.nan
+        frame[64] = np.inf
+        frame[96] = -np.inf
+
+        analyzer._process(frame)
+        mel_latest = buf.snapshot()[0][-1]
+        assert np.isfinite(mel_latest).all()
+        assert np.isfinite(captured[-1].loudness_db)
+        assert np.isfinite(captured[-1].centroid_hz)
+        assert 0.0 <= captured[-1].energy <= 1.0
+
+    def test_empty_chunk_does_not_kill_analyzer_thread(self):
+        buf = RollingBuffer()
+        analyzer = Analyzer(buf, on_frame=lambda _info: None)
+
+        analyzer.push_chunk(0, np.array([], dtype=np.float32))
+        time.sleep(0.05)
+        assert analyzer._thread.is_alive()
+
+    def test_int16_chunk_pipeline_still_produces_finite_payload(self):
+        buf = RollingBuffer()
+        state = LiveState()
+
+        def on_frame(info: FrameInfo) -> None:
+            mel_latest = buf.snapshot()[0][-1]
+            state.update_from_frame(info, mel_latest)
+
+        analyzer = Analyzer(buf, on_frame=on_frame)
+        signal = (make_vocal_like(f0=220, amplitude=0.3, duration_s=0.5) * 32767.0).astype(np.int16)
+
+        for i in range(0, len(signal), HOP_LENGTH):
+            chunk = signal[i:i + HOP_LENGTH]
+            if len(chunk) < HOP_LENGTH:
+                chunk = np.pad(chunk, (0, HOP_LENGTH - len(chunk)))
+            analyzer.push_chunk(i, chunk)
+
+        time.sleep(0.2)
+        snap = state.snapshot()
+        assert np.isfinite(np.array(snap["mel"], dtype=np.float32)).all()
+        assert np.isfinite(float(snap["loudness"]))
+        assert np.isfinite(float(snap["centroid"]))
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])

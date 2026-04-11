@@ -79,6 +79,8 @@ class Analyzer:
             except queue.Empty:
                 continue
             n = len(chunk)
+            if n <= 0:
+                continue
             self._ctx = np.roll(self._ctx, -n)
             self._ctx[-n:] = chunk
             try:
@@ -124,6 +126,8 @@ class Analyzer:
         return out
 
     def _process(self, frame: np.ndarray) -> None:
+        # Defend feature extraction from invalid audio values.
+        frame = np.nan_to_num(frame, nan=0.0, posinf=1.0, neginf=-1.0).astype(np.float32, copy=False)
         spectrum = np.abs(np.fft.rfft(frame * _WINDOW, n=FRAME_LENGTH)).astype(np.float32)
         mel = (_MEL_FB @ spectrum).astype(np.float32)
 
