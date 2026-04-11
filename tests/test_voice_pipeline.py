@@ -16,7 +16,9 @@ Tests:
 """
 
 import math
+import json
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -534,6 +536,99 @@ class TestNoteUtils:
         assert centroid_to_timbre(1000) == "Warm"
         assert centroid_to_timbre(2000) == "Bright"
         assert centroid_to_timbre(4000) == "Brilliant"
+
+
+# ═══════════════════════════════════════════════════════════
+# TEST 10: Real chunk→analyzer→buffer→LiveState→WS payload pipeline
+# ═══════════════════════════════════════════════════════════
+
+class TestChunkPipelineStress:
+    """High-signal tests for the real threaded analyzer pipeline."""
+
+    def test_full_chunk_pipeline_updates_state_and_payload(self):
+        buf = RollingBuffer(n_time=64, n_mels=N_MELS)
+        state = LiveState()
+        frame_count = {"n": 0}
+
+        def on_frame(info: FrameInfo) -> None:
+            mel_latest = buf.snapshot()[0][-1]
+            state.update_from_frame(info, mel_latest)
+            frame_count["n"] += 1
+
+        analyzer = Analyzer(buf, on_frame=on_frame)
+
+        # Create a voice-like stream with changing loudness so preprocessing has work to do.
+        signal = make_vocal_like(f0=280, n_harmonics=7, duration_s=1.2, amplitude=0.35)
+        envelope = np.linspace(0.2, 1.0, len(signal), dtype=np.float32)
+        signal = signal * envelope
+
+        expected_chunks = 0
+        for start in range(0, len(signal), HOP_LENGTH):
+            chunk = signal[start:start + HOP_LENGTH]
+            if len(chunk) < HOP_LENGTH:
+                chunk = np.pad(chunk, (0, HOP_LENGTH - len(chunk)))
+            analyzer.push_chunk(start, chunk.astype(np.float32))
+            expected_chunks += 1
+
+        deadline = time.time() + 2.5
+        while frame_count["n"] < min(expected_chunks, 12) and time.time() < deadline:
+            time.sleep(0.01)
+
+        snap = state.snapshot()
+        payload = json.loads(json.dumps(snap))
+
+        assert frame_count["n"] > 0, "Analyzer thread did not process any chunks"
+        assert len(payload["mel"]) == N_MELS
+        assert len(payload["melHist"]) > 0
+        assert len(payload["pitchHist"]) > 0
+        assert payload["energy"] >= 0.0
+        assert payload["onset"] >= 0.0
+        assert max(payload["mel"]) > 0.1, "Mel bins stayed too small for visualization"
+        assert len(payload["peaks"]) >= 1
+        assert all(0 <= p["bin"] < N_MELS for p in payload["peaks"])
+        assert all(p["value"] >= 0.0 for p in payload["peaks"])
+
+    def test_pipeline_handles_burst_stress_and_keeps_payload_valid(self):
+        """Push a burst of chunks faster than real-time and ensure payload remains sane."""
+        buf = RollingBuffer(n_time=200, n_mels=N_MELS)
+        state = LiveState()
+        frame_count = {"n": 0}
+
+        def on_frame(info: FrameInfo) -> None:
+            mel_latest = buf.snapshot()[0][-1]
+            state.update_from_frame(info, mel_latest)
+            frame_count["n"] += 1
+
+        analyzer = Analyzer(buf, on_frame=on_frame)
+        rng = np.random.default_rng(42)
+
+        # 500 chunks with mixed noise + harmonic content.
+        for i in range(500):
+            base = make_vocal_like(
+                f0=180 + (i % 8) * 35,
+                n_harmonics=5 + (i % 4),
+                duration_s=HOP_LENGTH / SR,
+                amplitude=0.05 + (i % 6) * 0.04,
+            )[:HOP_LENGTH]
+            noise = rng.normal(0.0, 0.008, size=HOP_LENGTH).astype(np.float32)
+            analyzer.push_chunk(i * HOP_LENGTH, (base + noise).astype(np.float32))
+
+        deadline = time.time() + 3.0
+        while frame_count["n"] < 40 and time.time() < deadline:
+            time.sleep(0.01)
+
+        snap = state.snapshot()
+        payload = json.dumps(snap)
+        payload_dict = json.loads(payload)
+
+        assert frame_count["n"] > 0, "No chunks were processed under burst load"
+        assert len(payload_dict["mel"]) == N_MELS
+        assert len(payload_dict["melHist"]) <= 10
+        assert len(payload_dict["pitchHist"]) <= 30
+        assert len(payload_dict["loudHist"]) <= 30
+        assert len(payload) / 1024 < 50.0
+        assert np.isfinite(np.array(payload_dict["mel"], dtype=np.float32)).all()
+        assert np.isfinite(np.array(payload_dict["loudHist"], dtype=np.float32)).all()
 
 
 if __name__ == "__main__":
