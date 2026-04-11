@@ -506,14 +506,7 @@ class MainWindow(QMainWindow):
 
     def _on_frame(self, info: FrameInfo) -> None:
         mel_latest = self._buffer.snapshot()[0][-1]
-        self._live.update(
-            mel=mel_latest,
-            pitch=info.pitch_hz,
-            loudness=info.loudness_db,
-            note=info.note_name,
-            timbre=info.timbre,
-            vocal_range=info.vocal_range,
-        )
+        self._live.update_from_frame(info, mel_latest)
 
     def _on_slider_moved(self, v: int) -> None:
         dur = self._player.duration
