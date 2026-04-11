@@ -42,56 +42,55 @@
         #status-badge.live  #status-text { color:rgba(134,239,172,.65); }
         #status-badge.error #status-text { color:rgba(252,165,165,.65); }
 
-        /* right sidebar */
+        /* compact floating analysis card */
         #info-panel {
-            position:absolute; top:18px; right:18px; bottom:18px; width:212px;
-            background:rgba(4,12,26,0.82); border:1px solid rgba(40,80,130,0.20);
-            border-radius:16px;
-            backdrop-filter:blur(26px) saturate(140%);
-            -webkit-backdrop-filter:blur(26px) saturate(140%);
-            box-shadow:0 32px 64px rgba(0,0,0,.55), inset 0 1px 0 rgba(255,255,255,.035);
-            display:flex; flex-direction:column; overflow:hidden;
+            position:absolute; top:26px; right:26px; width:250px;
+            background:linear-gradient(175deg, rgba(16,20,30,.56), rgba(8,10,15,.70));
+            border:1px solid rgba(255,255,255,.10);
+            border-radius:14px;
+            backdrop-filter:blur(24px) saturate(130%);
+            -webkit-backdrop-filter:blur(24px) saturate(130%);
+            box-shadow:0 20px 44px rgba(0,0,0,.45), inset 0 1px 0 rgba(255,255,255,.08);
+            padding:12px 12px 10px;
+            display:flex; flex-direction:column; gap:8px;
         }
-        .p-header { padding:14px 16px 12px; border-bottom:1px solid rgba(40,80,130,.16);
+        .p-header { padding:2px 2px 8px; border-bottom:1px solid rgba(255,255,255,.09);
             display:flex; align-items:center; justify-content:space-between; }
-        .p-header-label { font-size:9px; font-weight:800; letter-spacing:1.4px;
-            text-transform:uppercase; color:rgba(90,140,190,.40); }
+        .p-header-label { font-size:9px; font-weight:700; letter-spacing:1.1px;
+            text-transform:uppercase; color:rgba(216,224,240,.58); }
         .p-live-dot { width:5px; height:5px; border-radius:50%;
-            background:rgba(59,130,246,.45); box-shadow:0 0 5px rgba(59,130,246,.55); }
+            background:rgba(245,158,11,.72); box-shadow:0 0 8px rgba(245,158,11,.55); }
 
-        /* note ring hero */
-        .note-section { padding:16px 16px 14px; border-bottom:1px solid rgba(40,80,130,.12);
-            display:flex; flex-direction:column; align-items:center; gap:8px; }
-        .note-ring { width:84px; height:84px; border-radius:50%;
-            border:1.5px solid rgba(40,80,130,.20);
+        .note-section { padding:4px 2px 2px; display:flex; align-items:center; gap:12px; }
+        .note-ring { width:58px; height:58px; border-radius:50%;
+            border:1px solid rgba(255,255,255,.16);
             display:flex; align-items:center; justify-content:center;
             transition:border-color .3s, box-shadow .3s; }
-        .note-ring.voiced { border-color:rgba(96,165,250,.40);
-            box-shadow:0 0 22px rgba(59,130,246,.14), inset 0 0 16px rgba(59,130,246,.06); }
-        #v-note { font-size:34px; font-weight:800; letter-spacing:-1.5px; line-height:1;
-            color:rgba(160,200,240,.22); transition:color .2s, text-shadow .2s; }
-        #v-note.voiced { color:#f0f8ff; text-shadow:0 0 20px rgba(96,165,250,.28); }
-        #note-sub { font-size:9.5px; font-weight:600; letter-spacing:.7px;
-            text-transform:uppercase; color:rgba(90,140,190,.38); }
+        .note-ring.voiced { border-color:rgba(255,204,122,.56);
+            box-shadow:0 0 22px rgba(255,188,106,.20), inset 0 0 12px rgba(255,188,106,.08); }
+        #v-note { font-size:22px; font-weight:700; letter-spacing:-.6px; line-height:1;
+            color:rgba(232,238,255,.48); transition:color .2s, text-shadow .2s; }
+        #v-note.voiced { color:#fff4df; text-shadow:0 0 16px rgba(255,188,106,.28); }
+        #note-sub { font-size:9px; font-weight:600; letter-spacing:.7px;
+            text-transform:uppercase; color:rgba(206,214,232,.52); }
 
-        /* metrics */
-        .metrics { padding:8px 16px 12px; display:flex; flex-direction:column; flex:1; }
-        .metric { padding:9px 0; border-bottom:1px solid rgba(40,80,130,.09);
-            display:flex; flex-direction:column; gap:4px; }
+        .metrics { padding:2px; display:flex; flex-direction:column; gap:4px; }
+        .metric { padding:5px 0; border-bottom:1px solid rgba(255,255,255,.08);
+            display:flex; align-items:center; justify-content:space-between; gap:8px; }
         .metric:last-child { border-bottom:none; }
-        .m-label { font-size:8.5px; font-weight:800; letter-spacing:1.1px;
-            text-transform:uppercase; color:rgba(90,140,190,.38); }
+        .m-label { font-size:8px; font-weight:700; letter-spacing:1px;
+            text-transform:uppercase; color:rgba(220,226,240,.42); }
         .m-value { font-family:'JetBrains Mono','Fira Code','Consolas',monospace;
-            font-size:13.5px; font-weight:500; color:rgba(160,200,240,.25); transition:color .2s; }
-        .m-value.lit { color:#ddeeff; }
-        .vu-track { height:3px; border-radius:2px; background:rgba(20,50,90,.50);
-            overflow:hidden; margin-top:4px; }
+            font-size:12px; font-weight:500; color:rgba(220,228,244,.42); transition:color .2s; }
+        .m-value.lit { color:#fff8e9; }
+        .vu-track { height:3px; border-radius:2px; background:rgba(255,255,255,.12);
+            overflow:hidden; width:86px; margin-left:auto; }
         #vol-bar { height:100%; width:0%; border-radius:2px; background:#4ade80;
             transition:width .08s linear, background .25s; }
         .chip { display:inline-block; padding:3px 10px; border-radius:999px;
-            font-size:11px; font-weight:600; letter-spacing:.15px;
-            border:1px solid transparent; background:rgba(20,50,90,.20);
-            color:rgba(90,140,190,.30); transition:color .2s, background .2s, border-color .2s; }
+            font-size:10px; font-weight:600; letter-spacing:.15px;
+            border:1px solid rgba(255,255,255,.1); background:rgba(255,255,255,.03);
+            color:rgba(220,228,244,.54); transition:color .2s, background .2s, border-color .2s; }
         #ax-hint { position:absolute; bottom:22px; left:50%; transform:translateX(-50%);
             font-size:9px; letter-spacing:.6px; text-transform:uppercase;
             color:rgba(60,100,150,.28); pointer-events:none; white-space:nowrap; }
@@ -114,7 +113,9 @@
             <div class="note-ring" id="note-ring">
                 <span id="v-note">—</span>
             </div>
-            <div id="note-sub">No signal</div>
+            <div>
+                <div id="note-sub">No signal</div>
+            </div>
         </div>
         <div class="metrics">
             <div class="metric">
@@ -123,9 +124,9 @@
             </div>
             <div class="metric">
                 <div class="m-label">Volume</div>
-                <div class="m-value lit" id="v-vol">— dB</div>
-                <div class="vu-track">
-                    <div id="vol-bar"></div>
+                <div>
+                    <div class="m-value lit" id="v-vol">— dB</div>
+                    <div class="vu-track"><div id="vol-bar"></div></div>
                 </div>
             </div>
             <div class="metric">
