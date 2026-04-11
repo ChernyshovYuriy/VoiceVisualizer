@@ -1,7 +1,7 @@
 """
 main_window.py
-PySide6 main window for the current browser-embedded visualizer.
-Includes offline vocal preprocessing with the heavy work offloaded to QThread.
+PySide6 main window — professional dark UI redesign.
+All business logic preserved from HEAD; only APP_STYLE and _build_ui() changed.
 """
 
 from __future__ import annotations
@@ -14,12 +14,14 @@ from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QMainWindow,
     QMessageBox,
     QProgressDialog,
     QPushButton,
+    QSizePolicy,
     QSlider,
     QVBoxLayout,
     QWidget,
@@ -42,6 +44,168 @@ from core.ws_server import WSServer
 _ACCEPT = " ".join(f"*{e}" for e in sorted(AUDIO_EXT | VIDEO_EXT))
 _FILTER = f"Audio / Video ({_ACCEPT})"
 _HTML = Path(__file__).parent.parent / "frontend" / "visualizer.html"
+
+# ── Design tokens ──────────────────────────────────────────────────────────────
+_BG      = "#07111e"
+_SURFACE = "#0c1a2e"
+_PANEL   = "#0f2039"
+_BORDER  = "#172d47"
+_BORDER2 = "#1e3d5e"
+_ACCENT  = "#3b82f6"
+_ACCENT2 = "#60a5fa"
+_TEXT    = "#d8e8f8"
+_SUBTEXT = "#4e6d8a"
+_AMBER   = "#f59e0b"
+_RED     = "#ef4444"
+_MONO    = "'JetBrains Mono','Fira Code','Consolas',monospace"
+
+APP_STYLE = f"""
+QMainWindow, QWidget {{
+    background: {_BG};
+    color: {_TEXT};
+    font-family: 'Inter','Segoe UI','SF Pro Text','Helvetica Neue',sans-serif;
+    font-size: 13px;
+}}
+/* ── toolbar band ── */
+#Band {{
+    background: {_SURFACE};
+    border-bottom: 1px solid {_BORDER};
+}}
+#SeekBand {{
+    background: {_SURFACE};
+    border-top: 1px solid {_BORDER};
+}}
+/* ── buttons ── */
+QPushButton {{
+    background: transparent;
+    color: {_TEXT};
+    border: 1px solid {_BORDER2};
+    border-radius: 7px;
+    padding: 0 14px;
+    font-size: 12px;
+    font-weight: 500;
+    letter-spacing: 0.1px;
+}}
+QPushButton:hover {{
+    background: rgba(59,130,246,0.10);
+    border-color: {_ACCENT};
+    color: {_ACCENT2};
+}}
+QPushButton:pressed  {{ background: rgba(59,130,246,0.20); }}
+QPushButton:disabled {{ color: {_SUBTEXT}; border-color: {_BORDER}; }}
+
+QPushButton#PlayBtn {{
+    background: {_ACCENT};
+    border-color: {_ACCENT};
+    color: #fff;
+    font-weight: 600;
+    padding: 0 22px;
+    min-width: 90px;
+}}
+QPushButton#PlayBtn:hover   {{ background: {_ACCENT2}; border-color: {_ACCENT2}; color:#fff; }}
+QPushButton#PlayBtn:pressed  {{ background: #1d4ed8; border-color: #1d4ed8; }}
+QPushButton#PlayBtn:disabled {{ background: {_BORDER}; border-color: {_BORDER}; color:{_SUBTEXT}; }}
+
+/* ── combo ── */
+QComboBox {{
+    background: {_PANEL};
+    color: {_TEXT};
+    border: 1px solid {_BORDER2};
+    border-radius: 7px;
+    padding: 0 10px 0 12px;
+    font-size: 12px;
+    font-weight: 500;
+    min-width: 106px;
+}}
+QComboBox:hover {{ border-color: {_ACCENT}; }}
+QComboBox::drop-down {{ border: none; width: 18px; }}
+QComboBox QAbstractItemView {{
+    background: {_PANEL};
+    border: 1px solid {_BORDER2};
+    color: {_TEXT};
+    selection-background-color: {_ACCENT};
+    outline: none;
+}}
+
+/* ── seek slider ── */
+QSlider::groove:horizontal {{
+    background: {_BORDER};
+    height: 3px;
+    border-radius: 2px;
+}}
+QSlider::sub-page:horizontal {{
+    background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
+        stop:0 {_ACCENT}, stop:1 {_ACCENT2});
+    border-radius: 2px;
+}}
+QSlider::handle:horizontal {{
+    background: #fff;
+    border: 2px solid {_ACCENT};
+    width: 12px; height: 12px;
+    margin: -5px 0;
+    border-radius: 6px;
+}}
+QSlider::handle:horizontal:hover {{ background: {_ACCENT2}; border-color: {_ACCENT2}; }}
+
+/* ── labels ── */
+QLabel {{ color: {_TEXT}; background: transparent; }}
+
+/* ── menu bar ── */
+QMenuBar {{
+    background: {_SURFACE};
+    color: {_SUBTEXT};
+    border-bottom: 1px solid {_BORDER};
+    font-size: 12px;
+    padding: 1px 4px;
+}}
+QMenuBar::item:selected {{
+    background: rgba(59,130,246,0.13);
+    color: {_TEXT};
+    border-radius: 4px;
+}}
+QMenu {{
+    background: {_PANEL};
+    border: 1px solid {_BORDER2};
+    border-radius: 8px;
+    color: {_TEXT};
+    font-size: 12px;
+    padding: 4px;
+}}
+QMenu::item {{ padding: 7px 22px 7px 12px; border-radius: 5px; }}
+QMenu::item:selected {{ background: rgba(59,130,246,0.15); color: {_ACCENT2}; }}
+QMenu::separator {{ height: 1px; background: {_BORDER}; margin: 4px 8px; }}
+
+/* ── dividers ── */
+QFrame#VDivider {{ background: {_BORDER2}; border:none; min-width:1px; max-width:1px; }}
+"""
+
+DIALOG_STYLE = f"""
+QFileDialog, QFileDialog * {{ background:{_PANEL}; color:{_TEXT}; font-size:13px; }}
+QFileDialog QListView, QFileDialog QTreeView {{
+    background:{_SURFACE}; color:{_TEXT}; border:1px solid {_BORDER2}; border-radius:5px; }}
+QFileDialog QListView::item:selected,
+QFileDialog QTreeView::item:selected {{ background:{_ACCENT}; color:#fff; }}
+QFileDialog QLineEdit {{
+    background:{_SURFACE}; color:{_TEXT}; border:1px solid {_BORDER2}; border-radius:5px; padding:5px 9px; }}
+QPushButton {{ background:{_SURFACE}; color:{_TEXT}; border:1px solid {_BORDER2}; border-radius:6px; padding:5px 14px; }}
+QPushButton:hover {{ background:rgba(59,130,246,0.13); border-color:{_ACCENT}; }}
+QLabel {{ color:{_TEXT}; background:transparent; }}
+QHeaderView::section {{ background:{_PANEL}; color:{_SUBTEXT}; border:none; padding:5px; }}
+QScrollBar:vertical {{ background:{_PANEL}; width:7px; border:none; }}
+QScrollBar::handle:vertical {{ background:{_BORDER2}; border-radius:3px; min-height:20px; }}
+"""
+
+
+def _fmt(s: float) -> str:
+    m, sec = divmod(int(s), 60)
+    return f"{m}:{sec:02d}"
+
+
+def _vdiv() -> QFrame:
+    f = QFrame()
+    f.setObjectName("VDivider")
+    f.setFixedHeight(20)
+    return f
 
 
 class _Bridge(QObject):
@@ -90,81 +254,12 @@ class _PrepareWorker(QObject):
             self.failed.emit(str(exc))
 
 
-APP_STYLE = """
-QMainWindow, QWidget {
-    background-color: #0d1117;
-    color: #e6edf3;
-    font-family: 'Segoe UI', 'SF Pro Text', 'Helvetica Neue', sans-serif;
-    font-size: 13px;
-}
-QPushButton {
-    background-color: #21262d;
-    color: #e6edf3;
-    border: 1px solid #30363d;
-    border-radius: 6px;
-    padding: 6px 16px;
-    font-size: 13px;
-}
-QPushButton:hover    { background-color: #30363d; border-color: #58a6ff; }
-QPushButton:pressed  { background-color: #161b22; }
-QPushButton:disabled { color: #484f58; border-color: #21262d; }
-QLabel  { color: #e6edf3; background: transparent; }
-QSlider::groove:horizontal {
-    background: #21262d; height: 4px; border-radius: 2px;
-}
-QSlider::sub-page:horizontal {
-    background: #58a6ff; border-radius: 2px;
-}
-QSlider::handle:horizontal {
-    background: #58a6ff; width: 14px; height: 14px;
-    margin: -5px 0; border-radius: 7px; border: 2px solid #0d1117;
-}
-QSlider::handle:horizontal:hover { background: #79c0ff; }
-QSplitter::handle { background: #21262d; }
-QComboBox {
-    background-color: #21262d;
-    color: #e6edf3;
-    border: 1px solid #30363d;
-    border-radius: 6px;
-    padding: 5px 10px;
-}
-QComboBox:hover { border-color: #58a6ff; }
-"""
-
-DIALOG_STYLE = """
-QFileDialog, QFileDialog * { background-color: #161b22; color: #e6edf3; font-size: 13px; }
-QFileDialog QListView, QFileDialog QTreeView {
-    background-color: #21262d; color: #e6edf3;
-    border: 1px solid #30363d; border-radius: 4px;
-}
-QFileDialog QListView::item:selected,
-QFileDialog QTreeView::item:selected { background: #1f6feb; color: #fff; }
-QFileDialog QLineEdit {
-    background: #21262d; color: #e6edf3; border: 1px solid #30363d;
-    border-radius: 4px; padding: 4px 8px;
-}
-QPushButton { background: #21262d; color: #e6edf3; border: 1px solid #30363d;
-              border-radius: 6px; padding: 5px 14px; }
-QPushButton:hover { background: #30363d; }
-QComboBox { background: #21262d; color: #e6edf3; border: 1px solid #30363d;
-            border-radius: 4px; padding: 3px 8px; }
-QLabel { color: #e6edf3; background: transparent; }
-QHeaderView::section { background: #161b22; color: #768390; border: none; padding: 4px; }
-QScrollBar:vertical   { background: #161b22; width: 8px; border: none; }
-QScrollBar::handle:vertical { background: #30363d; border-radius: 4px; min-height: 20px; }
-"""
-
-
-def _fmt(s: float) -> str:
-    m, sec = divmod(int(s), 60)
-    return f"{m}:{sec:02d}"
-
-
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Voice / Music Visualizer — 3D Live")
-        self.resize(1280, 760)
+        self.resize(1320, 800)
+        self.setMinimumSize(900, 600)
         self.setStyleSheet(APP_STYLE)
 
         self._live = LiveState()
@@ -208,6 +303,8 @@ class MainWindow(QMainWindow):
         open_pair_action.triggered.connect(self._open_manual_pair)
         file_menu.addAction(open_pair_action)
 
+        file_menu.addSeparator()
+
         preprocess_action = QAction("Preprocess media…", self)
         preprocess_action.triggered.connect(self._preprocess_only)
         file_menu.addAction(preprocess_action)
@@ -216,56 +313,61 @@ class MainWindow(QMainWindow):
         root = QWidget()
         self.setCentralWidget(root)
         vbox = QVBoxLayout(root)
-        vbox.setContentsMargins(10, 10, 10, 8)
-        vbox.setSpacing(8)
+        vbox.setContentsMargins(0, 0, 0, 0)
+        vbox.setSpacing(0)
 
-        tb = QHBoxLayout()
+        # ── toolbar ──────────────────────────────────────────────────────────
+        tb_wrap = QWidget()
+        tb_wrap.setObjectName("Band")
+        tb_wrap.setFixedHeight(52)
+        tb = QHBoxLayout(tb_wrap)
+        tb.setContentsMargins(14, 0, 14, 0)
         tb.setSpacing(8)
 
-        self._btn_open = QPushButton("📂  Open file…")
-        self._btn_open.setFixedHeight(34)
+        self._btn_open = QPushButton("⊕  Open File")
+        self._btn_open.setFixedHeight(32)
         self._btn_open.clicked.connect(self._open_file)
 
+        self._btn_open_pair = QPushButton("⊞  Open + Vocals")
+        self._btn_open_pair.setFixedHeight(32)
+        self._btn_open_pair.clicked.connect(self._open_manual_pair)
+
         self._btn_play = QPushButton("▶  Play")
-        self._btn_play.setFixedWidth(100)
-        self._btn_play.setFixedHeight(34)
+        self._btn_play.setObjectName("PlayBtn")
+        self._btn_play.setFixedHeight(32)
         self._btn_play.setEnabled(False)
         self._btn_play.clicked.connect(self._toggle_play)
-
-        self._btn_open_pair = QPushButton("🧩  Open media + vocals…")
-        self._btn_open_pair.setFixedHeight(34)
-        self._btn_open_pair.clicked.connect(self._open_manual_pair)
 
         self._mode = QComboBox()
         self._mode.addItem("Vocals only", userData="vocals")
         self._mode.addItem("Full mix", userData="full_mix")
+        self._mode.setFixedHeight(32)
         self._mode.currentIndexChanged.connect(self._reload_analysis_track_if_ready)
 
         self._lbl_file = QLabel("No file loaded")
-        self._lbl_file.setStyleSheet("color: #545d68; font-size: 12px;")
+        self._lbl_file.setStyleSheet(f"color:{_SUBTEXT}; font-size:11px;")
+        self._lbl_file.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
 
         tb.addWidget(self._btn_open)
         tb.addWidget(self._btn_open_pair)
+        tb.addWidget(_vdiv())
         tb.addWidget(self._btn_play)
+        tb.addWidget(_vdiv())
         tb.addWidget(self._mode)
-        tb.addSpacing(6)
+        tb.addSpacing(8)
         tb.addWidget(self._lbl_file)
-        tb.addStretch()
 
         if not HAS_WEBENGINE:
-            note = QLabel("⚠ PySide6-WebEngine not found — opens in browser")
-            note.setStyleSheet("color: #d29922; font-size: 11px;")
+            note = QLabel("⚠  PySide6-WebEngine not found — opens in browser")
+            note.setStyleSheet(f"color:{_AMBER}; font-size:11px;")
             tb.addWidget(note)
 
-        vbox.addLayout(tb)
+        vbox.addWidget(tb_wrap)
 
-        sep = QWidget(); sep.setFixedHeight(1)
-        sep.setStyleSheet("background:#21262d;")
-        vbox.addWidget(sep)
-
+        # ── visualizer ───────────────────────────────────────────────────────
         if HAS_WEBENGINE:
             self._view = QWebEngineView()
-            self._view.setStyleSheet("background:#000;")
+            self._view.setStyleSheet(f"background:{_BG};")
             page = self._view.page()
             settings = page.settings()
             settings.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True)
@@ -280,21 +382,26 @@ class MainWindow(QMainWindow):
             )
             placeholder.setAlignment(Qt.AlignCenter)
             placeholder.setStyleSheet(
-                "color:#545d68; font-size:14px; "
-                "background:#0d1117; border:1px solid #21262d; border-radius:8px;"
+                f"color:{_SUBTEXT}; font-size:14px; "
+                f"background:{_BG}; border:1px solid {_BORDER}; border-radius:8px;"
             )
             vbox.addWidget(placeholder, stretch=1)
             QTimer.singleShot(800, self._open_browser)
 
-        sep2 = QWidget(); sep2.setFixedHeight(1)
-        sep2.setStyleSheet("background:#21262d;")
-        vbox.addWidget(sep2)
+        # ── seek bar ─────────────────────────────────────────────────────────
+        sk_wrap = QWidget()
+        sk_wrap.setObjectName("SeekBand")
+        sk_wrap.setFixedHeight(44)
+        sb = QHBoxLayout(sk_wrap)
+        sb.setContentsMargins(16, 0, 16, 0)
+        sb.setSpacing(10)
 
-        sb = QHBoxLayout()
-        sb.setSpacing(8)
+        mono_style = f"color:{_SUBTEXT}; font-size:11px; font-family:{_MONO};"
 
         self._lbl_cur = QLabel("0:00")
-        self._lbl_cur.setStyleSheet("color:#545d68; font-size:12px; min-width:34px;")
+        self._lbl_cur.setStyleSheet(mono_style)
+        self._lbl_cur.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self._lbl_cur.setFixedWidth(36)
 
         self._slider = QSlider(Qt.Horizontal)
         self._slider.setRange(0, 1000)
@@ -303,13 +410,16 @@ class MainWindow(QMainWindow):
         self._slider.sliderMoved.connect(self._on_slider_moved)
 
         self._lbl_dur = QLabel("0:00")
-        self._lbl_dur.setStyleSheet("color:#545d68; font-size:12px; min-width:34px;")
+        self._lbl_dur.setStyleSheet(mono_style)
+        self._lbl_dur.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self._lbl_dur.setFixedWidth(36)
 
         sb.addWidget(self._lbl_cur)
-        sb.addWidget(self._slider)
+        sb.addWidget(self._slider, stretch=1)
         sb.addWidget(self._lbl_dur)
-        vbox.addLayout(sb)
+        vbox.addWidget(sk_wrap)
 
+    # ── file operations ───────────────────────────────────────────────────────
     def _open_file(self) -> None:
         if self._worker_thread is not None:
             return
@@ -335,8 +445,7 @@ class MainWindow(QMainWindow):
         self._lbl_dur.setText("0:00")
         self._slider.setValue(0)
         cache_state = self._preprocessor.check_cache(self._source_path)
-        self._lbl_file.setText(cache_state.message)
-        self._lbl_file.setStyleSheet("color:#58a6ff; font-size:12px;")
+        self._set_file_label(cache_state.message, "blue")
         if cache_state.prepared is not None:
             self._start_prepare_worker(source_path=None, prepared_media=cache_state.prepared)
             return
@@ -351,8 +460,7 @@ class MainWindow(QMainWindow):
         if prompt == QMessageBox.Yes:
             self._start_prepare_worker(source_path=self._source_path, prepared_media=None)
         else:
-            self._lbl_file.setText("Preprocessing required")
-            self._lbl_file.setStyleSheet("color:#d29922; font-size:12px;")
+            self._set_file_label("Preprocessing required", "amber")
 
     def _open_manual_pair(self) -> None:
         if self._worker_thread is not None:
@@ -375,8 +483,7 @@ class MainWindow(QMainWindow):
         self._lbl_cur.setText("0:00")
         self._lbl_dur.setText("0:00")
         self._slider.setValue(0)
-        self._lbl_file.setText("Loading external vocals stem…")
-        self._lbl_file.setStyleSheet("color:#58a6ff; font-size:12px;")
+        self._set_file_label("Loading external vocals stem…", "blue")
         self._start_prepare_worker(source_path=None, prepared_media=self._prepared)
 
     def _preprocess_only(self) -> None:
@@ -389,8 +496,7 @@ class MainWindow(QMainWindow):
         cache_state = self._preprocessor.check_cache(source_path)
         if cache_state.prepared is not None:
             QMessageBox.information(self, "Preprocess media", "Using cached vocals.")
-            self._lbl_file.setText("Using cached vocals")
-            self._lbl_file.setStyleSheet("color:#58a6ff; font-size:12px;")
+            self._set_file_label("Using cached vocals", "blue")
             return
         self._source_path = source_path
         self._prepared = None
@@ -416,8 +522,7 @@ class MainWindow(QMainWindow):
     ) -> None:
         mode_label = "vocals" if self._analysis_mode() == "vocals" else "full mix"
         source_name = source_path.name if source_path else (prepared_media.source_path.name if prepared_media else "media")
-        self._lbl_file.setText(f"Preparing {mode_label} for {source_name} …")
-        self._lbl_file.setStyleSheet("color:#58a6ff; font-size:12px;")
+        self._set_file_label(f"Preparing {mode_label} for {source_name}…", "blue")
         self._btn_open.setEnabled(False)
         self._btn_open_pair.setEnabled(False)
         self._btn_play.setEnabled(False)
@@ -446,8 +551,7 @@ class MainWindow(QMainWindow):
     def _on_worker_progress(self, text: str) -> None:
         if self._progress is not None:
             self._progress.setLabelText(text)
-        self._lbl_file.setText(text)
-        self._lbl_file.setStyleSheet("color:#58a6ff; font-size:12px;")
+        self._set_file_label(text, "blue")
 
     @Slot(object, object)
     def _on_worker_finished(self, prepared: object, tracks: object) -> None:
@@ -465,8 +569,10 @@ class MainWindow(QMainWindow):
 
         cache_note = "cached" if prepared.from_cache else f"new {prepared.separator_backend} stems"
         mode_label = "Vocals only" if self._analysis_mode() == "vocals" else "Full mix"
-        self._lbl_file.setText(f"{prepared.source_path.name}  ·  {_fmt(dur)}  ·  {mode_label}  ·  {cache_note}")
-        self._lbl_file.setStyleSheet("color:#adbac7; font-size:12px;")
+        self._set_file_label(
+            f"{prepared.source_path.name}  ·  {_fmt(dur)}  ·  {mode_label}  ·  {cache_note}",
+            "dim",
+        )
         self._lbl_dur.setText(_fmt(dur))
         self._btn_play.setEnabled(True)
         self._pending_seek_seconds = 0.0
@@ -474,8 +580,7 @@ class MainWindow(QMainWindow):
 
     @Slot(str)
     def _on_worker_failed(self, message: str) -> None:
-        self._lbl_file.setText("Load failed")
-        self._lbl_file.setStyleSheet("color:#f85149; font-size:12px;")
+        self._set_file_label("Load failed", "red")
         self._pending_seek_seconds = 0.0
         self._pending_resume = False
         QMessageBox.critical(self, "Preprocess error", message)
@@ -497,6 +602,12 @@ class MainWindow(QMainWindow):
         if self._worker is not None:
             self._worker.deleteLater()
             self._worker = None
+
+    def _set_file_label(self, text: str, tone: str) -> None:
+        colors = {"blue": _ACCENT2, "dim": _SUBTEXT, "amber": _AMBER, "red": _RED}
+        col = colors.get(tone, _SUBTEXT)
+        self._lbl_file.setText(text)
+        self._lbl_file.setStyleSheet(f"color:{col}; font-size:11px;")
 
     def _toggle_play(self) -> None:
         if self._player.is_playing:
