@@ -19,8 +19,8 @@ if TYPE_CHECKING:
     from core.analyzer import FrameInfo
 
 # How many past frames of history to include in the WS payload.
-_MEL_HISTORY = 10      # last N mel frames  (10×64 = 640 floats ≈ 4 KB)
-_SCALAR_HISTORY = 30   # last N pitch / loudness / centroid values
+_MEL_HISTORY = 10  # last N mel frames  (10×64 = 640 floats ≈ 4 KB)
+_SCALAR_HISTORY = 30  # last N pitch / loudness / centroid values
 
 
 class LiveState:
@@ -48,6 +48,27 @@ class LiveState:
         self._loudness_history: deque[float] = deque(maxlen=_SCALAR_HISTORY)
         self._centroid_history: deque[float] = deque(maxlen=_SCALAR_HISTORY)
         self._onset_history: deque[float] = deque(maxlen=_SCALAR_HISTORY)
+
+    def reset(self) -> None:
+        """Clear all histories and reset to initial state (used on new file load)."""
+        with self._lock:
+            self.mel = [0.0] * 64
+            self.pitch = 0.0
+            self.loudness = -80.0
+            self.note = "—"
+            self.timbre = "—"
+            self.vocal_range = "—"
+            self.centroid = 0.0
+            self.onset = 0.0
+            self.energy = 0.0
+            self.pitch_confidence = 0.0
+            self.peaks = []
+
+            self._mel_history.clear()
+            self._pitch_history.clear()
+            self._loudness_history.clear()
+            self._centroid_history.clear()
+            self._onset_history.clear()
 
     # ── write ─────────────────────────────────────────────────
 

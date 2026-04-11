@@ -5,13 +5,14 @@ Emits results via a caller-supplied callback (thread-safe via Qt signal bridge).
 """
 
 from __future__ import annotations
+
 import math
 import queue
 import threading
 from dataclasses import dataclass
 
-import numpy as np
 import librosa
+import numpy as np
 
 from core.buffer import RollingBuffer
 from utils.note_utils import hz_to_note_name, hz_to_vocal_range, centroid_to_timbre
@@ -57,7 +58,7 @@ class Analyzer:
 
     def __init__(self, buffer: RollingBuffer, on_frame) -> None:
         self._buffer = buffer
-        self._on_frame = on_frame          # callable(FrameInfo) – must be thread-safe
+        self._on_frame = on_frame  # callable(FrameInfo) – must be thread-safe
         self._queue: queue.Queue = queue.Queue(maxsize=80)
         self._ctx = np.zeros(FRAME_LENGTH, dtype=np.float32)  # rolling audio context
         self._prev_mel = np.zeros(N_MELS, dtype=np.float32)
@@ -128,6 +129,9 @@ class Analyzer:
     def _process(self, frame: np.ndarray) -> None:
         # Defend feature extraction from invalid audio values.
         frame = np.nan_to_num(frame, nan=0.0, posinf=1.0, neginf=-1.0).astype(np.float32, copy=False)
+
+        frame = np.clip(frame, -1.0, 1.0)  # ← (prevents huge RMS)
+
         spectrum = np.abs(np.fft.rfft(frame * _WINDOW, n=FRAME_LENGTH)).astype(np.float32)
         mel = (_MEL_FB @ spectrum).astype(np.float32)
 
@@ -164,8 +168,14 @@ class Analyzer:
             pitch = float("nan")
 
         pitch_conf = self._estimate_pitch_confidence(spectrum, pitch)
-        if pitch_conf < 0.12:
+
+        # Stronger gating for quiet signals
+        # Much stricter gating for quiet / unreliable signals
+        # Stricter gating: reject quiet or low-confidence pitches
+        rms = float(np.sqrt(np.mean(frame ** 2)))
+        if pitch_conf < 0.25 or rms < 0.02 or not np.isfinite(pitch):
             pitch = float("nan")
+            pitch_conf = 0.0
 
         rms = float(np.sqrt(np.mean(frame ** 2)))
         loudness_db = 20.0 * math.log10(rms + 1e-10)
@@ -173,8 +183,16 @@ class Analyzer:
         spec_sum = float(np.sum(spectrum))
         centroid_hz = float(np.dot(_FREQS, spectrum) / (spec_sum + 1e-10))
 
-        onset = float(np.mean(np.maximum(mel_norm - self._prev_mel, 0.0)))
-        onset = float(np.clip(onset * 3.5, 0.0, 1.0))
+        # Improved onset: boost when coming from near-silence
+        # Onset detection - more responsive after silence
+        delta = np.maximum(mel_norm - self._prev_mel, 0.0)
+        onset_raw = float(np.mean(delta))
+        prev_mean = float(np.mean(self._prev_mel))
+
+        if prev_mean < 0.08 and onset_raw > 0.005:
+            onset = float(np.clip(onset_raw * 8.0 + 0.20, 0.0, 1.0))
+        else:
+            onset = float(np.clip(onset_raw * 3.5, 0.0, 1.0))
 
         energy = float(np.mean(mel_norm))
         peak_bin = int(np.argmax(mel_norm))

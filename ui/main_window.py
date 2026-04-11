@@ -328,6 +328,7 @@ class MainWindow(QMainWindow):
         self._prepared = None
         self._player.stop()
         self._buffer.reset()
+        self._live.reset()
         self._btn_play.setText("▶  Play")
         self._btn_play.setEnabled(False)
         self._lbl_cur.setText("0:00")
@@ -368,6 +369,7 @@ class MainWindow(QMainWindow):
         self._prepared = self._preprocessor.build_external_prepared(source_path, vocals_path)
         self._player.stop()
         self._buffer.reset()
+        self._live.reset()
         self._btn_play.setText("▶  Play")
         self._btn_play.setEnabled(False)
         self._lbl_cur.setText("0:00")
