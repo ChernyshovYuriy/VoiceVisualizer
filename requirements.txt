@@ -8,9 +8,9 @@ sounddevice>=0.4.6
 soundfile>=0.12.1
 scipy>=1.11.0
 websockets>=12.0
-
 # Optional separator backends for offline vocal preprocessing
 # Preferred backend (in-process):
 demucs>=4.0.1
 # Fallback backend (CLI):
 spleeter>=2.4.0
+pytest

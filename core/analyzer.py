@@ -126,8 +126,24 @@ class Analyzer:
     def _process(self, frame: np.ndarray) -> None:
         spectrum = np.abs(np.fft.rfft(frame * _WINDOW, n=FRAME_LENGTH)).astype(np.float32)
         mel = (_MEL_FB @ spectrum).astype(np.float32)
-        mel_db = librosa.amplitude_to_db(mel, ref=1.0)
-        mel_norm = np.clip((mel_db + 80.0) / 80.0, 0.0, 1.0)
+
+        # ── Per-frame relative normalization ──────────────────
+        # Normalize mel to spectral SHAPE (peak bin = 1.0) then
+        # scale by loudness so quiet frames are dimmer.
+        # This gives proper contrast between frequency bands
+        # instead of saturating everything to ~1.0.
+        mel_peak = float(np.max(mel))
+        if mel_peak > 1e-6:
+            mel_shape = (mel / mel_peak).astype(np.float32)
+        else:
+            mel_shape = np.zeros(N_MELS, dtype=np.float32)
+
+        rms = float(np.sqrt(np.mean(frame ** 2)))
+        loudness_db = 20.0 * math.log10(rms + 1e-10)
+
+        # Map loudness to 0–1 scale: -55 dB → 0, -10 dB → 1
+        loud_scale = float(np.clip((loudness_db + 55.0) / 45.0, 0.0, 1.0))
+        mel_norm = (mel_shape * loud_scale).astype(np.float32)
 
         try:
             f0 = librosa.yin(
