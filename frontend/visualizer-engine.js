@@ -28,7 +28,12 @@ const VISUAL_SCENE_CONFIG = {
     ringGlow: 1.0,
     ringOpacity: 1.0,
     ringEchoCount: 0,
-    ringActivationPitchConfFloor: 0.08
+    ringActivationPitchConfFloor: 0.08,
+    liveRingMinRadius: 0.72,
+    liveRingMaxRadius: 2.2,
+    liveRingMinSigma: 0.018,
+    liveRingMaxSigma: 0.09,
+    liveRingCarrierSafetyMargin: 0.16
 };
 
 class BackgroundSystem {
@@ -198,6 +203,12 @@ class LiveRingSystem {
         scene.add(this.group);
         this.isDebugView = Boolean(VISUAL_SCENE_CONFIG.DEBUG_VIEW);
         this.ringMaterials = [];
+        this.liveRingMinRadius = VISUAL_SCENE_CONFIG.liveRingMinRadius;
+        this.liveRingMaxRadius = VISUAL_SCENE_CONFIG.liveRingMaxRadius;
+        this.liveRingMinSigma = VISUAL_SCENE_CONFIG.liveRingMinSigma;
+        this.liveRingMaxSigma = VISUAL_SCENE_CONFIG.liveRingMaxSigma;
+        this.liveRingCarrierSafetyMargin = VISUAL_SCENE_CONFIG.liveRingCarrierSafetyMargin;
+        this.liveRingCarrierExtent = 0;
         this.ringState = {
             y: -0.5,
             radius: 1.0,
@@ -242,7 +253,11 @@ class LiveRingSystem {
         // Quad extent covers ring radius + 3.2 * sigma_halo so fragments at the
         // very edge of the bloom are still sampled before the discard threshold.
         const haloSigma = def.sigma * 7.5;
-        const extent    = def.r + haloSigma * 3.2;
+        const maxHaloSigma = this.liveRingMaxSigma * 7.5;
+        const extent = Math.max(
+            def.r + haloSigma * 4.0 + this.liveRingCarrierSafetyMargin,
+            this.liveRingMaxRadius + maxHaloSigma * 4.0 + this.liveRingCarrierSafetyMargin
+        );
 
         // -----------------------------------------------------------------
         // PASS 1 — CORE  (NormalBlending)
@@ -329,10 +344,7 @@ class LiveRingSystem {
             `
         });
 
-        const coreMesh = new THREE.Mesh(
-            new THREE.PlaneGeometry(extent * 2.0, extent * 2.0, 1, 1),
-            coreMat
-        );
+        const coreMesh = new THREE.Mesh(new THREE.PlaneGeometry(extent * 2.0, extent * 2.0, 1, 1), coreMat);
         coreMesh.rotation.x = -Math.PI / 2;
         group.add(coreMesh);
         this.ringMaterials.push(coreMat);
@@ -427,14 +439,14 @@ class LiveRingSystem {
             `
         });
 
-        const haloMesh = new THREE.Mesh(
-            new THREE.PlaneGeometry(extent * 2.0, extent * 2.0, 1, 1),
-            haloMat
-        );
+        const haloMesh = new THREE.Mesh(new THREE.PlaneGeometry(extent * 2.0, extent * 2.0, 1, 1), haloMat);
         haloMesh.rotation.x = -Math.PI / 2;
         group.add(haloMesh);
         this.ringMaterials.push(haloMat);
         this.liveRingGroup = group;
+        this.liveRingCoreMesh = coreMesh;
+        this.liveRingHaloMesh = haloMesh;
+        this.liveRingCarrierExtent = extent;
         this.coreMat = coreMat;
         this.haloMat = haloMat;
         this.base = {
@@ -446,6 +458,31 @@ class LiveRingSystem {
         };
 
         return group;
+    }
+
+    clampLiveParams(radius, sigma, haloSigma, maxRadiusFactor = 1) {
+        const factor = Math.max(1, maxRadiusFactor);
+        const safeRadius = MathUtils.clamp(radius, this.liveRingMinRadius, this.liveRingMaxRadius / factor);
+        const safeSigma = MathUtils.clamp(sigma, this.liveRingMinSigma, this.liveRingMaxSigma);
+        const minHaloSigma = this.liveRingMinSigma * 7.5;
+        const maxHaloSigma = this.liveRingMaxSigma * 7.5;
+        const safeHaloSigma = MathUtils.clamp(haloSigma, minHaloSigma, maxHaloSigma);
+        return { safeRadius, safeSigma, safeHaloSigma };
+    }
+
+    ensureLiveRingCarrierExtent(radius, haloSigma) {
+        const requiredExtent = radius + haloSigma * 4.0 + this.liveRingCarrierSafetyMargin;
+        if (requiredExtent <= this.liveRingCarrierExtent) {
+            return;
+        }
+
+        const nextExtent = requiredExtent + this.liveRingCarrierSafetyMargin;
+        const nextGeometry = new THREE.PlaneGeometry(nextExtent * 2.0, nextExtent * 2.0, 1, 1);
+        this.liveRingCoreMesh.geometry.dispose();
+        this.liveRingHaloMesh.geometry.dispose();
+        this.liveRingCoreMesh.geometry = nextGeometry;
+        this.liveRingHaloMesh.geometry = nextGeometry.clone();
+        this.liveRingCarrierExtent = nextExtent;
     }
 
     setLiveState(liveState = null) {
@@ -473,15 +510,23 @@ class LiveRingSystem {
         this.liveRingGroup.visible = visible > 0.01;
         this.liveRingGroup.position.y = this.ringState.y;
 
-        const liveRadius = this.base.radius * this.ringState.radius;
+        const liveRadiusRaw = this.base.radius * this.ringState.radius;
+        const coreSigmaRaw = this.base.sigma * VISUAL_SCENE_CONFIG.ringThickness * (1 + this.ringState.thicknessEmphasis);
+        const haloSigmaRaw = this.base.haloSigma * VISUAL_SCENE_CONFIG.ringThickness * (1 + this.ringState.thicknessEmphasis * 0.7);
+        const radiusCoreFactor = 1 + this.ringState.radiusEmphasis;
+        const radiusHaloFactor = 1 + this.ringState.radiusEmphasis * 0.85;
+        const maxRadiusFactor = Math.max(radiusCoreFactor, radiusHaloFactor);
+        const { safeRadius, safeSigma, safeHaloSigma } = this.clampLiveParams(liveRadiusRaw, coreSigmaRaw, haloSigmaRaw, maxRadiusFactor);
+        this.ensureLiveRingCarrierExtent(safeRadius * maxRadiusFactor, safeHaloSigma);
+
         this.coreMat.uniforms.uBaseColor.value.copy(this.ringState.color);
         this.haloMat.uniforms.uBaseColor.value.copy(this.ringState.color);
         this.coreMat.uniforms.uMaxOpacity.value = this.base.coreOpacity * VISUAL_SCENE_CONFIG.ringOpacity * visible * (1 + this.ringState.coreIntensity * 1.35);
         this.haloMat.uniforms.uHaloOpacity.value = this.base.haloOpacity * VISUAL_SCENE_CONFIG.ringGlow * visible * (1 + this.ringState.haloIntensity * 1.9);
-        this.coreMat.uniforms.uSigma.value = this.base.sigma * VISUAL_SCENE_CONFIG.ringThickness * (1 + this.ringState.thicknessEmphasis);
-        this.haloMat.uniforms.uHaloSigma.value = this.base.haloSigma * VISUAL_SCENE_CONFIG.ringThickness * (1 + this.ringState.thicknessEmphasis * 0.7);
-        this.coreMat.uniforms.uRadius.value = liveRadius * (1 + this.ringState.radiusEmphasis);
-        this.haloMat.uniforms.uRadius.value = liveRadius * (1 + this.ringState.radiusEmphasis * 0.85);
+        this.coreMat.uniforms.uSigma.value = safeSigma;
+        this.haloMat.uniforms.uHaloSigma.value = safeHaloSigma;
+        this.coreMat.uniforms.uRadius.value = safeRadius * radiusCoreFactor;
+        this.haloMat.uniforms.uRadius.value = safeRadius * radiusHaloFactor;
     }
 
     colorForPitchNorm(pitchNorm) {
@@ -523,7 +568,7 @@ class LiveRingSystem {
         const timbreTilt = (centroidNorm - 0.5) * 0.08;
         return {
             y: -1.45 + pitchNorm * 3.05,
-            radius: 0.72 + loudNorm * 1.18 + onset * 0.09,
+            radius: MathUtils.clamp(0.72 + loudNorm * 1.18 + onset * 0.09, this.liveRingMinRadius, this.liveRingMaxRadius),
             visibility: MathUtils.clamp(confidenceGate * 0.92 + loudNorm * 0.08, 0, 1),
             coreIntensity: MathUtils.clamp(loudNorm * 0.82 + onset * 0.65, 0, 1.5),
             haloIntensity: MathUtils.clamp(loudNorm * 0.74 + onset * 0.7, 0, 1.5),
