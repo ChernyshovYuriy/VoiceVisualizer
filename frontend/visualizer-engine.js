@@ -9,7 +9,6 @@ const VISUAL_SCENE_CONFIG = {
     bandSoftness: 1.34,
     axisOpacity: 0.07,
     axisHeight: 2.35,
-    bloomStrength: 0.18,
     cameraDistance: 6.7,
     depthAttenuation: 0.14,
     pitchBandCount: 7
@@ -181,22 +180,21 @@ class RingSystem {
         this.group = new THREE.Group();
         scene.add(this.group);
 
-        // 6 rings, ordered back-to-front so near rings composite over far ones.
+        // 5 rings, back-to-front.
         //
-        // sigma      — Gaussian half-width of the luminous band, world units.
-        //              Defined as a physical size; perspective projection handles
-        //              apparent screen thinning for distant rings automatically.
-        // maxOpacity — peak alpha at the ring centerline (core pass).
-        // haloOpacity— peak alpha for the additive halo pass.
-        // color      — dark base color; luminance is applied via the profile
-        //              multiplier inside the shader, not via a bright hex value.
+        // Colors match the mockup's neon spectrum exactly:
+        //   cyan (farthest/top) → teal → gold → amber → deep orange (nearest/bottom).
+        //
+        // sigma        — core Gaussian half-width, world units. Kept narrow so the
+        //               centerline reads as a sharp luminous tube, not a soft band.
+        // coreOpacity  — peak alpha at centerline. Near-opaque to produce solid neon.
+        // haloOpacity  — peak alpha of the wide additive bloom pass.
         const ringDefinitions = [
-            { y:  1.60, z: -3.20, r: 0.52, sigma: 0.045, maxOpacity: 0.18, haloOpacity: 0.04, color: 0x3a4a58 },
-            { y:  1.10, z: -2.50, r: 0.74, sigma: 0.058, maxOpacity: 0.28, haloOpacity: 0.06, color: 0x4a5040 },
-            { y:  0.48, z: -1.70, r: 1.00, sigma: 0.074, maxOpacity: 0.42, haloOpacity: 0.07, color: 0x5a5245 },
-            { y: -0.22, z: -0.88, r: 1.28, sigma: 0.096, maxOpacity: 0.58, haloOpacity: 0.09, color: 0x6e5a38 },
-            { y: -0.86, z: -0.18, r: 1.58, sigma: 0.124, maxOpacity: 0.74, haloOpacity: 0.10, color: 0x7a5530 },
-            { y: -1.40, z:  0.42, r: 1.92, sigma: 0.160, maxOpacity: 0.92, haloOpacity: 0.12, color: 0x8a6030 },
+            { y:  1.32, z: -2.15, r: 0.66, sigma: 0.022, coreOpacity: 0.82, haloOpacity: 0.35, color: 0x00ccff },
+            { y:  0.68, z: -1.50, r: 0.88, sigma: 0.026, coreOpacity: 0.88, haloOpacity: 0.40, color: 0x00ffcc },
+            { y:  0.04, z: -0.84, r: 1.12, sigma: 0.030, coreOpacity: 0.90, haloOpacity: 0.43, color: 0xffd700 },
+            { y: -0.62, z: -0.16, r: 1.40, sigma: 0.036, coreOpacity: 0.93, haloOpacity: 0.47, color: 0xff9900 },
+            { y: -1.22, z:  0.50, r: 1.75, sigma: 0.044, coreOpacity: 0.96, haloOpacity: 0.52, color: 0xff5500 },
         ];
 
         ringDefinitions.forEach((def) => {
@@ -208,27 +206,29 @@ class RingSystem {
         const group = new THREE.Group();
         group.position.set(0, def.y, def.z);
 
-        const baseColor = new THREE.Color(def.color);
+        const baseColor  = new THREE.Color(def.color);
 
-        // Quad size: covers ring radius + worst-case halo reach (sigma * 3.5 * 3.5 = ~12×sigma).
-        // Any fragment beyond 3*sigma_halo contributes < 1% and is discarded in the shader.
-        const haloReach = def.sigma * 3.5 * 3.5;
-        const extent    = def.r + haloReach;
+        // Halo sigma is 7.5× the core — this wide ratio is what produces the
+        // characteristic spill of colored light seen around each ring in the mockup.
+        // Quad extent covers ring radius + 3.2 * sigma_halo so fragments at the
+        // very edge of the bloom are still sampled before the discard threshold.
+        const haloSigma = def.sigma * 7.5;
+        const extent    = def.r + haloSigma * 3.2;
 
-        // ------------------------------------------------------------------
+        // -----------------------------------------------------------------
         // PASS 1 — CORE  (NormalBlending)
         //
-        // Single Gaussian: profile = exp(-d²/2σ²) where d = |dist_from_centerline|.
-        // No smoothstep. No stacked luminance bands. No hard edges.
+        // Narrow Gaussian. Near-opaque at centerline.
         //
-        // Luminance:  baseColor * (0.40 + 0.60 * profile)
-        //             → dim at falloff edge, full-bright only at centerline.
-        // Saturation: mix(0.12, 0.78, dF)
-        //             → primary depth cue; far rings read near-grey.
-        // Depth:      dF = exp(-|viewZ| * 0.088)
-        //             → exponential, not linear; range ~[0.42, 0.58] across stack.
-        // Alpha:      profile * maxOpacity * dF, hard cap 0.88.
-        // ------------------------------------------------------------------
+        // Depth model: exp(-viewZ * 0.042) — very gentle fade.
+        //   At the camera distances used (viewZ 6–9), this gives dF 0.69–0.78.
+        //   Rings dim slightly with depth but never desaturate. Saturation = 1.0
+        //   everywhere — the mockup shows fully saturated cyan at the farthest ring.
+        //
+        // Luminance: baseColor * (0.70 + 0.30 * profile)
+        //   Centerline gets full color, edge gets 70% — a gentle inner falloff
+        //   that keeps the tube body bright without a hard boundary.
+        // -----------------------------------------------------------------
         const coreMat = new THREE.ShaderMaterial({
             transparent: true,
             depthWrite: false,
@@ -239,7 +239,7 @@ class RingSystem {
                 uBaseColor:  { value: baseColor.clone() },
                 uRadius:     { value: def.r },
                 uSigma:      { value: def.sigma },
-                uMaxOpacity: { value: def.maxOpacity },
+                uMaxOpacity: { value: def.coreOpacity },
             },
             vertexShader: `
                 varying vec2  vLocal;
@@ -260,35 +260,19 @@ class RingSystem {
                 uniform float uSigma;
                 uniform float uMaxOpacity;
 
-                vec3 applySaturation(vec3 color, float sat) {
-                    float lum = dot(color, vec3(0.299, 0.587, 0.114));
-                    return mix(vec3(lum), color, sat);
-                }
-
                 void main() {
-                    // Circular distance in local XY.
-                    // The ring plane is horizontal (rotation.x = -PI/2); perspective
-                    // naturally produces ellipses — no manual Y warp needed or wanted.
-                    float d            = length(vLocal);
-                    float distFromEdge = abs(d - uRadius);
+                    float d       = length(vLocal);
+                    float dist    = abs(d - uRadius);
+                    float profile = exp(-(dist * dist) / (2.0 * uSigma * uSigma));
 
-                    // One Gaussian. No plateaus, no shoulders, no hard cutoffs.
-                    float profile = exp(-(distFromEdge * distFromEdge) / (2.0 * uSigma * uSigma));
                     if (profile < 0.005) discard;
 
-                    // Exponential depth factor.
-                    // Ring 5 at viewZ≈6.28 → dF≈0.575
-                    // Ring 0 at viewZ≈9.90 → dF≈0.418
-                    float dF = exp(-vViewZ * 0.088);
-
-                    // Saturation is the primary depth cue — drops aggressively.
-                    // At dF=0.418 (far): sat=0.19. At dF=0.575 (near): sat=0.38.
-                    float sat   = mix(0.12, 0.78, dF);
-                    vec3  color = uBaseColor * (0.40 + 0.60 * profile);
-                    color       = applySaturation(color, sat);
-
+                    // Gentle depth fade — neon color and saturation never change.
+                    float dF    = exp(-vViewZ * 0.042);
                     float alpha = profile * uMaxOpacity * dF;
-                    alpha = min(alpha, 0.88);
+                    alpha = min(alpha, 0.96);
+
+                    vec3 color = uBaseColor * (0.70 + 0.30 * profile);
 
                     gl_FragColor = vec4(color, alpha);
                 }
@@ -302,21 +286,22 @@ class RingSystem {
         coreMesh.rotation.x = -Math.PI / 2;
         group.add(coreMesh);
 
-        // ------------------------------------------------------------------
-        // PASS 2 — HALO  (AdditiveBlending)
+        // -----------------------------------------------------------------
+        // PASS 2 — BLOOM HALO  (AdditiveBlending)
         //
-        // Wider Gaussian representing light scattered into surrounding space.
+        // sigma_halo = sigma_core * 7.5
+        // This extreme ratio separates the bloom visually from the core,
+        // producing the wide colored spill seen in the mockup — especially
+        // visible at the bottom two rings where orange light pools broadly.
         //
-        // sigmaHalo = sigmaCore * mix(2.2, 3.5, dF)
-        //   Near rings (dF=0.575) → multiplier=2.95 → looser, wider glow.
-        //   Far  rings (dF=0.418) → multiplier=2.74 → tighter, more focused.
+        // Asymmetric falloff:
+        //   signedDist >= 0 (outside ring) → full sigma_halo
+        //   signedDist <  0 (inside ring)  → sigma_halo * 0.55
+        // Glow radiates outward into open space more than inward.
         //
-        // Asymmetric falloff: inward side uses sigmaHalo * 0.55.
-        //   A real emissive torus scatters more light into open space (outside)
-        //   than toward the hollow center (inside). This reproduces that behavior.
-        //
-        // Alpha: profile * haloOpacity * dF  (no cap — additive so it won't clip).
-        // ------------------------------------------------------------------
+        // No alpha cap — additive blending accumulates luminance but
+        // cannot exceed the display maximum, so capping is unnecessary.
+        // -----------------------------------------------------------------
         const haloMat = new THREE.ShaderMaterial({
             transparent: true,
             depthWrite: false,
@@ -326,7 +311,7 @@ class RingSystem {
             uniforms: {
                 uBaseColor:   { value: baseColor.clone() },
                 uRadius:      { value: def.r },
-                uSigmaCore:   { value: def.sigma },
+                uHaloSigma:   { value: haloSigma },
                 uHaloOpacity: { value: def.haloOpacity },
             },
             vertexShader: `
@@ -345,34 +330,25 @@ class RingSystem {
                 varying float vViewZ;
                 uniform vec3  uBaseColor;
                 uniform float uRadius;
-                uniform float uSigmaCore;
+                uniform float uHaloSigma;
                 uniform float uHaloOpacity;
-
-                vec3 applySaturation(vec3 color, float sat) {
-                    float lum = dot(color, vec3(0.299, 0.587, 0.114));
-                    return mix(vec3(lum), color, sat);
-                }
 
                 void main() {
                     float d          = length(vLocal);
-                    // Signed: positive = outside the ring, negative = inside the hollow.
                     float signedDist = d - uRadius;
 
-                    float dF = exp(-vViewZ * 0.088);
+                    // Asymmetric: outward = full sigma, inward = 55%
+                    float sigma   = (signedDist >= 0.0) ? uHaloSigma : uHaloSigma * 0.55;
+                    float profile = exp(-(signedDist * signedDist) / (2.0 * sigma * sigma));
 
-                    // Halo width grows toward the camera.
-                    float sigmaHalo = uSigmaCore * mix(2.2, 3.5, dF);
-                    // Inward side is tighter — glow radiates into open space, not inward.
-                    float sigmaUsed = (signedDist >= 0.0) ? sigmaHalo : sigmaHalo * 0.55;
+                    if (profile < 0.003) discard;
 
-                    float profile = exp(-(signedDist * signedDist) / (2.0 * sigmaUsed * sigmaUsed));
-                    if (profile < 0.004) discard;
-
-                    // Halo saturation — slightly lower than core at same depth.
-                    float sat   = mix(0.08, 0.65, dF);
-                    vec3  color = applySaturation(uBaseColor, sat);
-
+                    float dF    = exp(-vViewZ * 0.042);
                     float alpha = profile * uHaloOpacity * dF;
+
+                    // Halo color: same hue, slightly dimmer than core so the
+                    // centerline still reads as the brightest point.
+                    vec3 color = uBaseColor * 0.85;
 
                     gl_FragColor = vec4(color, alpha);
                 }
