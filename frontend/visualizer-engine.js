@@ -49,7 +49,12 @@ const VISUAL_SCENE_CONFIG = {
     ringStateSmoothingSpeed: 8.0,
     ringDeactivateHoldSeconds: 0.2,
     ringEntryDurationSeconds: 0.28,
-    ringEntrySpawnY: -1.88
+    ringExitDurationSeconds: 0.4,
+    ringEntrySpawnY: -1.88,
+    ringReactivationOnThreshold: 0.26,
+    ringReactivationOffThreshold: 0.13,
+    ringReactivationMinPitchConf: 0.14,
+    ringReactivationMinLoudness: 0.03
 };
 
 class BackgroundSystem {
@@ -307,6 +312,12 @@ class LiveRingSystem {
             progress: 1,
             startY: VISUAL_SCENE_CONFIG.ringEntrySpawnY
         };
+        this.exitState = {
+            active: false,
+            progress: 1,
+            startY: VISUAL_SCENE_CONFIG.ringEntrySpawnY
+        };
+        this.voiceGateLatched = false;
         const baseDefinition = { y: -0.5, z: -0.72, r: 1.05, sigma: 0.032, coreOpacity: 0.92, haloOpacity: 0.46, color: 0xffa338 };
         const motion = {
             phase: 0.95,
@@ -580,8 +591,11 @@ class LiveRingSystem {
 
     setLiveState(liveState = null, dt = 1 / 60, elapsed = 0) {
         const state = liveState || {};
-        const active = Boolean(state.active);
-        if (active) {
+        const hasLiveSignal = Boolean(state.active);
+        const reactivationPulse = Boolean(state.reactivate);
+        const canFollowPitch = hasLiveSignal && (this.ringLifecycleState !== 'exiting' || reactivationPulse);
+
+        if (canFollowPitch) {
             this.targetPitchY = state.y ?? this.targetPitchY;
             if (!this.wasLiveActive || this.ringLifecycleState === 'hidden' || this.ringLifecycleState === 'exiting') {
                 this.entryState.active = true;
@@ -589,6 +603,9 @@ class LiveRingSystem {
                 this.entryState.startY = VISUAL_SCENE_CONFIG.ringEntrySpawnY;
                 this.displayY = this.entryState.startY;
                 this.ringLifecycleState = 'entering';
+                this.exitState.active = false;
+                this.exitState.progress = 1;
+                this.exitState.startY = VISUAL_SCENE_CONFIG.ringEntrySpawnY;
             } else if (this.ringLifecycleState !== 'entering') {
                 this.ringLifecycleState = 'active';
             }
@@ -604,6 +621,9 @@ class LiveRingSystem {
                 this.ringLifecycleState = 'exiting';
                 this.entryState.active = false;
                 this.entryState.progress = 1;
+                this.exitState.active = true;
+                this.exitState.progress = 0;
+                this.exitState.startY = Math.max(this.displayY, VISUAL_SCENE_CONFIG.ringEntrySpawnY);
             }
             const inHold = (elapsed - this.lastActiveTime) <= VISUAL_SCENE_CONFIG.ringDeactivateHoldSeconds;
             this.targetState.visibility = inHold ? Math.max(this.targetState.visibility * 0.94, 0.08) : 0;
@@ -634,16 +654,25 @@ class LiveRingSystem {
         } else if (this.ringLifecycleState === 'active') {
             this.displayY = this.smoothToward(this.displayY, this.targetPitchY, VISUAL_SCENE_CONFIG.ringYSmoothingSpeed, dt);
         } else if (this.ringLifecycleState === 'exiting') {
-            this.displayY = this.smoothToward(this.displayY, VISUAL_SCENE_CONFIG.ringEntrySpawnY, VISUAL_SCENE_CONFIG.ringYSmoothingSpeed * 0.9, dt);
+            const exitDuration = Math.max(0.08, VISUAL_SCENE_CONFIG.ringExitDurationSeconds);
+            this.exitState.progress = Math.min(1, this.exitState.progress + dt / exitDuration);
+            const eased = 1 - Math.pow(1 - this.exitState.progress, 2);
+            this.displayY = MathUtils.lerp(this.exitState.startY, VISUAL_SCENE_CONFIG.ringEntrySpawnY, eased);
             const closeToBase = Math.abs(this.displayY - VISUAL_SCENE_CONFIG.ringEntrySpawnY) < 0.02;
             if (this.ringState.visibility < 0.01 && this.targetState.visibility <= 0.001 && closeToBase) {
                 this.ringLifecycleState = 'hidden';
                 this.displayY = VISUAL_SCENE_CONFIG.ringEntrySpawnY;
+                this.exitState.active = false;
+                this.exitState.progress = 1;
+                this.exitState.startY = VISUAL_SCENE_CONFIG.ringEntrySpawnY;
             }
-        } else if (!active && this.ringState.visibility < 0.01 && this.targetState.visibility <= 0.001) {
+        } else if (!hasLiveSignal && this.ringState.visibility < 0.01 && this.targetState.visibility <= 0.001) {
             this.entryState.progress = 1;
             this.entryState.active = false;
             this.entryState.startY = VISUAL_SCENE_CONFIG.ringEntrySpawnY;
+            this.exitState.active = false;
+            this.exitState.progress = 1;
+            this.exitState.startY = VISUAL_SCENE_CONFIG.ringEntrySpawnY;
             this.displayY = VISUAL_SCENE_CONFIG.ringEntrySpawnY;
             this.ringLifecycleState = 'hidden';
         }
@@ -653,7 +682,7 @@ class LiveRingSystem {
             this.ringState.color.lerp(state.color, 0.18);
             this.targetState.color.copy(state.color);
         }
-        this.wasLiveActive = active;
+        this.wasLiveActive = canFollowPitch;
     }
 
     update(timeSeconds = 0, liveState = null, dt = 1 / 60) {
@@ -707,6 +736,7 @@ class LiveRingSystem {
 
     mapLiveRingState(audioState) {
         if (!audioState) {
+            this.voiceGateLatched = false;
             return { visibility: 0 };
         }
 
@@ -716,7 +746,26 @@ class LiveRingSystem {
         const onset = MathUtils.clamp(Math.max(audioState.transientFlash ?? 0, audioState.onset ?? 0), 0, 1);
         const centroidNorm = MathUtils.clamp(audioState.centroidNorm ?? 0.5, 0, 1);
         const confidenceGate = Math.max(0, (pitchConf - VISUAL_SCENE_CONFIG.ringActivationPitchConfFloor) / (1 - VISUAL_SCENE_CONFIG.ringActivationPitchConfFloor));
-        const hasVoice = confidenceGate > 0.01 && loudNorm > 0.015;
+        const sustainScore = confidenceGate * 0.76 + loudNorm * 0.24;
+        const activateScore = confidenceGate * 0.8 + loudNorm * 0.2 + onset * 0.12;
+        const minPitchConf = VISUAL_SCENE_CONFIG.ringReactivationMinPitchConf;
+        const minLoudness = VISUAL_SCENE_CONFIG.ringReactivationMinLoudness;
+        const offThreshold = VISUAL_SCENE_CONFIG.ringReactivationOffThreshold;
+        const onThreshold = VISUAL_SCENE_CONFIG.ringReactivationOnThreshold;
+        const qualifiesForActivation = activateScore >= onThreshold && pitchConf >= minPitchConf && loudNorm >= minLoudness;
+        const shouldStayLatched = sustainScore >= offThreshold && pitchConf >= VISUAL_SCENE_CONFIG.ringActivationPitchConfFloor && loudNorm >= 0.012;
+
+        let reactivated = false;
+        if (this.voiceGateLatched) {
+            if (!shouldStayLatched) {
+                this.voiceGateLatched = false;
+            }
+        } else if (qualifiesForActivation) {
+            this.voiceGateLatched = true;
+            reactivated = true;
+        }
+
+        const hasVoice = this.voiceGateLatched;
 
         if (!hasVoice) {
             return { visibility: 0 };
@@ -725,6 +774,7 @@ class LiveRingSystem {
         const timbreTilt = (centroidNorm - 0.5) * 0.08;
         return {
             active: true,
+            reactivate: reactivated,
             y: -1.45 + pitchNorm * 3.05,
             radius: MathUtils.clamp(0.72 + loudNorm * 1.18 + onset * 0.09, this.liveRingMinRadius, this.liveRingMaxRadius),
             visibility: MathUtils.clamp(confidenceGate * 0.92 + loudNorm * 0.08, 0, 1),
