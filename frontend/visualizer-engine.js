@@ -24,77 +24,12 @@ const VISUAL_SCENE_CONFIG = {
         luminance: 3.8,
         radius: 4.6
     },
-    reactiveRingCount: 5,
-    ringActivationAttackBoost: 0.45,
+    ringThickness: 1.0,
+    ringGlow: 1.0,
+    ringOpacity: 1.0,
+    ringEchoCount: 0,
     ringActivationPitchConfFloor: 0.08
 };
-
-class RingAudioMapper {
-    constructor(ringCount = VISUAL_SCENE_CONFIG.reactiveRingCount) {
-        this.ringCount = ringCount;
-    }
-
-    createIdleState() {
-        return Array.from({ length: this.ringCount }, () => ({
-            activation: 0,
-            coreIntensity: 0,
-            haloIntensity: 0,
-            thicknessEmphasis: 0,
-            radiusEmphasis: 0
-        }));
-    }
-
-    map(audioState) {
-        const perRing = this.createIdleState();
-        if (!audioState) {
-            return perRing;
-        }
-
-        const pitchNorm = this.safeNorm(audioState.pitchNorm);
-        const loudNorm = this.safeNorm(audioState.loudNorm);
-        const pitchConf = this.safeNorm(audioState.pitchConf);
-        const onset = this.safeNorm(Math.max(audioState.transientFlash ?? 0, audioState.onset ?? 0));
-
-        const confidenceGate = Math.max(0, (pitchConf - VISUAL_SCENE_CONFIG.ringActivationPitchConfFloor) / (1 - VISUAL_SCENE_CONFIG.ringActivationPitchConfFloor));
-        if (confidenceGate <= 0 || loudNorm <= 0.001) {
-            return perRing;
-        }
-
-        const ringPosition = pitchNorm * (this.ringCount - 1);
-        const lowerIndex = Math.floor(ringPosition);
-        const upperIndex = Math.min(this.ringCount - 1, lowerIndex + 1);
-        const upperWeight = ringPosition - lowerIndex;
-        const lowerWeight = 1 - upperWeight;
-
-        const baseStrength = loudNorm * confidenceGate;
-        const attackBoost = onset * VISUAL_SCENE_CONFIG.ringActivationAttackBoost;
-
-        this.applyActivation(perRing, lowerIndex, lowerWeight, baseStrength, attackBoost);
-        if (upperIndex !== lowerIndex) {
-            this.applyActivation(perRing, upperIndex, upperWeight, baseStrength, attackBoost);
-        }
-
-        return perRing;
-    }
-
-    applyActivation(perRing, ringIndex, blendWeight, baseStrength, attackBoost) {
-        const activation = this.safeNorm((baseStrength + attackBoost) * blendWeight);
-        perRing[ringIndex] = {
-            activation,
-            coreIntensity: activation,
-            haloIntensity: this.safeNorm(activation * 0.84 + attackBoost * 0.20 * blendWeight),
-            thicknessEmphasis: activation * 0.14,
-            radiusEmphasis: activation * 0.06
-        };
-    }
-
-    safeNorm(value) {
-        if (!Number.isFinite(value)) {
-            return 0;
-        }
-        return Math.max(0, Math.min(1, value));
-    }
-}
 
 class BackgroundSystem {
     constructor(scene) {
@@ -257,46 +192,32 @@ class PitchBandSystem {
     update() {}
 }
 
-class RingSystem {
+class LiveRingSystem {
     constructor(scene) {
         this.group = new THREE.Group();
         scene.add(this.group);
         this.isDebugView = Boolean(VISUAL_SCENE_CONFIG.DEBUG_VIEW);
-
-        // 5 rings, back-to-front.
-        //
-        // Colors match the mockup's neon spectrum exactly:
-        //   cyan (farthest/top) → teal → gold → amber → deep orange (nearest/bottom).
-        //
-        // sigma        — core Gaussian half-width, world units. Kept narrow so the
-        //               centerline reads as a sharp luminous tube, not a soft band.
-        // coreOpacity  — peak alpha at centerline. Near-opaque to produce solid neon.
-        // haloOpacity  — peak alpha of the wide additive bloom pass.
         this.ringMaterials = [];
-        this.ringEntries = [];
-
-        const ringDefinitions = [
-            { y:  1.32, z: -2.15, r: 0.66, sigma: 0.022, coreOpacity: 0.82, haloOpacity: 0.35, color: 0x00ccff },
-            { y:  0.68, z: -1.50, r: 0.88, sigma: 0.026, coreOpacity: 0.88, haloOpacity: 0.40, color: 0x00ffcc },
-            { y:  0.04, z: -0.84, r: 1.12, sigma: 0.030, coreOpacity: 0.90, haloOpacity: 0.43, color: 0xffd700 },
-            { y: -0.62, z: -0.16, r: 1.40, sigma: 0.036, coreOpacity: 0.93, haloOpacity: 0.47, color: 0xff9900 },
-            { y: -1.22, z:  0.50, r: 1.75, sigma: 0.044, coreOpacity: 0.96, haloOpacity: 0.52, color: 0xff5500 },
-        ];
-
-        const ringCount = ringDefinitions.length;
-        ringDefinitions.forEach((def, index) => {
-            const nearWeight = index / (ringCount - 1);
-            const motion = {
-                phase: 0.65 + index * 1.17,
-                speed: VISUAL_SCENE_CONFIG.ringMotionSpeed * (0.92 + nearWeight * 0.22),
-                thicknessAmp: def.thicknessAmp ?? (VISUAL_SCENE_CONFIG.ringThicknessMotion * (0.76 + nearWeight * 0.48)),
-                luminanceAmp: def.luminanceAmp ?? (VISUAL_SCENE_CONFIG.ringLuminanceMotion * (0.74 + nearWeight * 0.50)),
-                radiusAmp: def.radiusAmp ?? (VISUAL_SCENE_CONFIG.ringRadiusMotion * (0.64 + nearWeight * 0.62))
-            };
-            this.applyDebugMotionScale(motion);
-
-            this.group.add(this.createRing(def, motion));
-        });
+        this.ringState = {
+            y: -0.5,
+            radius: 1.0,
+            visibility: 0,
+            coreIntensity: 0,
+            haloIntensity: 0,
+            thicknessEmphasis: 0,
+            radiusEmphasis: 0,
+            color: new THREE.Color(0xffa338)
+        };
+        const baseDefinition = { y: -0.5, z: -0.72, r: 1.05, sigma: 0.032, coreOpacity: 0.92, haloOpacity: 0.46, color: 0xffa338 };
+        const motion = {
+            phase: 0.95,
+            speed: VISUAL_SCENE_CONFIG.ringMotionSpeed,
+            thicknessAmp: VISUAL_SCENE_CONFIG.ringThicknessMotion,
+            luminanceAmp: VISUAL_SCENE_CONFIG.ringLuminanceMotion,
+            radiusAmp: VISUAL_SCENE_CONFIG.ringRadiusMotion
+        };
+        this.applyDebugMotionScale(motion);
+        this.group.add(this.createRing(baseDefinition, motion));
     }
 
     applyDebugMotionScale(motion) {
@@ -513,57 +434,103 @@ class RingSystem {
         haloMesh.rotation.x = -Math.PI / 2;
         group.add(haloMesh);
         this.ringMaterials.push(haloMat);
-        this.ringEntries.push({
-            coreMat,
-            haloMat,
-            base: {
-                coreOpacity: def.coreOpacity,
-                haloOpacity: def.haloOpacity,
-                sigma: def.sigma,
-                haloSigma,
-                radius: def.r
-            },
-            reactive: {
-                activation: 0,
-                coreIntensity: 0,
-                haloIntensity: 0,
-                thicknessEmphasis: 0,
-                radiusEmphasis: 0
-            }
-        });
+        this.liveRingGroup = group;
+        this.coreMat = coreMat;
+        this.haloMat = haloMat;
+        this.base = {
+            coreOpacity: def.coreOpacity,
+            haloOpacity: def.haloOpacity,
+            sigma: def.sigma,
+            haloSigma,
+            radius: def.r
+        };
 
         return group;
     }
 
-    setReactiveState(perRingState = []) {
-        this.ringEntries.forEach((entry, index) => {
-            const ringState = perRingState[index] || {};
-            entry.reactive.activation = MathUtils.clamp(ringState.activation || 0, 0, 1);
-            entry.reactive.coreIntensity = MathUtils.clamp(ringState.coreIntensity || 0, 0, 1.5);
-            entry.reactive.haloIntensity = MathUtils.clamp(ringState.haloIntensity || 0, 0, 1.5);
-            entry.reactive.thicknessEmphasis = MathUtils.clamp(ringState.thicknessEmphasis || 0, 0, 0.35);
-            entry.reactive.radiusEmphasis = MathUtils.clamp(ringState.radiusEmphasis || 0, 0, 0.25);
-        });
+    setLiveState(liveState = null) {
+        const state = liveState || {};
+        this.ringState.y = MathUtils.lerp(this.ringState.y, state.y ?? this.ringState.y, 0.18);
+        this.ringState.radius = MathUtils.lerp(this.ringState.radius, state.radius ?? this.ringState.radius, 0.2);
+        this.ringState.visibility = MathUtils.lerp(this.ringState.visibility, state.visibility ?? 0, 0.22);
+        this.ringState.coreIntensity = MathUtils.lerp(this.ringState.coreIntensity, state.coreIntensity ?? 0, 0.2);
+        this.ringState.haloIntensity = MathUtils.lerp(this.ringState.haloIntensity, state.haloIntensity ?? 0, 0.2);
+        this.ringState.thicknessEmphasis = MathUtils.lerp(this.ringState.thicknessEmphasis, state.thicknessEmphasis ?? 0, 0.18);
+        this.ringState.radiusEmphasis = MathUtils.lerp(this.ringState.radiusEmphasis, state.radiusEmphasis ?? 0, 0.2);
+        if (state.color) {
+            this.ringState.color.lerp(state.color, 0.18);
+        }
     }
 
-    update(timeSeconds = 0, audioState = null) {
+    update(timeSeconds = 0, liveState = null) {
         for (const material of this.ringMaterials) {
             material.uniforms.uTime.value = timeSeconds;
         }
 
-        if (audioState) {
-            this.setReactiveState(audioState);
+        this.setLiveState(liveState);
+
+        const visible = MathUtils.clamp(this.ringState.visibility, 0, 1);
+        this.liveRingGroup.visible = visible > 0.01;
+        this.liveRingGroup.position.y = this.ringState.y;
+
+        const liveRadius = this.base.radius * this.ringState.radius;
+        this.coreMat.uniforms.uBaseColor.value.copy(this.ringState.color);
+        this.haloMat.uniforms.uBaseColor.value.copy(this.ringState.color);
+        this.coreMat.uniforms.uMaxOpacity.value = this.base.coreOpacity * VISUAL_SCENE_CONFIG.ringOpacity * visible * (1 + this.ringState.coreIntensity * 1.35);
+        this.haloMat.uniforms.uHaloOpacity.value = this.base.haloOpacity * VISUAL_SCENE_CONFIG.ringGlow * visible * (1 + this.ringState.haloIntensity * 1.9);
+        this.coreMat.uniforms.uSigma.value = this.base.sigma * VISUAL_SCENE_CONFIG.ringThickness * (1 + this.ringState.thicknessEmphasis);
+        this.haloMat.uniforms.uHaloSigma.value = this.base.haloSigma * VISUAL_SCENE_CONFIG.ringThickness * (1 + this.ringState.thicknessEmphasis * 0.7);
+        this.coreMat.uniforms.uRadius.value = liveRadius * (1 + this.ringState.radiusEmphasis);
+        this.haloMat.uniforms.uRadius.value = liveRadius * (1 + this.ringState.radiusEmphasis * 0.85);
+    }
+
+    colorForPitchNorm(pitchNorm) {
+        const t = MathUtils.clamp(pitchNorm, 0, 1);
+        const stops = [
+            { t: 0.0, color: new THREE.Color(0xff5a33) },
+            { t: 0.45, color: new THREE.Color(0xffc84a) },
+            { t: 0.68, color: new THREE.Color(0x8fbf5b) },
+            { t: 1.0, color: new THREE.Color(0x36b7d9) }
+        ];
+
+        for (let i = 0; i < stops.length - 1; i++) {
+            const a = stops[i];
+            const b = stops[i + 1];
+            if (t >= a.t && t <= b.t) {
+                return a.color.clone().lerp(b.color, (t - a.t) / (b.t - a.t));
+            }
+        }
+        return stops[stops.length - 1].color.clone();
+    }
+
+    mapLiveRingState(audioState) {
+        if (!audioState) {
+            return { visibility: 0 };
         }
 
-        for (const entry of this.ringEntries) {
-            const reactive = entry.reactive;
-            entry.coreMat.uniforms.uMaxOpacity.value = entry.base.coreOpacity * (1 + reactive.coreIntensity * 1.35);
-            entry.haloMat.uniforms.uHaloOpacity.value = entry.base.haloOpacity * (1 + reactive.haloIntensity * 1.9);
-            entry.coreMat.uniforms.uSigma.value = entry.base.sigma * (1 + reactive.thicknessEmphasis);
-            entry.haloMat.uniforms.uHaloSigma.value = entry.base.haloSigma * (1 + reactive.thicknessEmphasis * 0.7);
-            entry.coreMat.uniforms.uRadius.value = entry.base.radius * (1 + reactive.radiusEmphasis);
-            entry.haloMat.uniforms.uRadius.value = entry.base.radius * (1 + reactive.radiusEmphasis * 0.85);
+        const pitchNorm = MathUtils.clamp(audioState.pitchNorm ?? 0, 0, 1);
+        const loudNorm = MathUtils.clamp(audioState.loudNorm ?? 0, 0, 1);
+        const pitchConf = MathUtils.clamp(audioState.pitchConf ?? 0, 0, 1);
+        const onset = MathUtils.clamp(Math.max(audioState.transientFlash ?? 0, audioState.onset ?? 0), 0, 1);
+        const centroidNorm = MathUtils.clamp(audioState.centroidNorm ?? 0.5, 0, 1);
+        const confidenceGate = Math.max(0, (pitchConf - VISUAL_SCENE_CONFIG.ringActivationPitchConfFloor) / (1 - VISUAL_SCENE_CONFIG.ringActivationPitchConfFloor));
+        const hasVoice = confidenceGate > 0.01 && loudNorm > 0.015;
+
+        if (!hasVoice) {
+            return { visibility: 0 };
         }
+
+        const timbreTilt = (centroidNorm - 0.5) * 0.08;
+        return {
+            y: -1.45 + pitchNorm * 3.05,
+            radius: 0.72 + loudNorm * 1.18 + onset * 0.09,
+            visibility: MathUtils.clamp(confidenceGate * 0.92 + loudNorm * 0.08, 0, 1),
+            coreIntensity: MathUtils.clamp(loudNorm * 0.82 + onset * 0.65, 0, 1.5),
+            haloIntensity: MathUtils.clamp(loudNorm * 0.74 + onset * 0.7, 0, 1.5),
+            thicknessEmphasis: MathUtils.clamp(confidenceGate * 0.12 + onset * 0.16, 0, 0.35),
+            radiusEmphasis: MathUtils.clamp(loudNorm * 0.08 + onset * 0.1, 0, 0.25),
+            color: this.colorForPitchNorm(MathUtils.clamp(pitchNorm + timbreTilt, 0, 1))
+        };
     }
 }
 
@@ -642,7 +609,6 @@ class VisualizerEngine {
         this.orbitControls = null;
         this.lastDebugLogTime = -Infinity;
         this.debugLabel = document.getElementById('debug-camera-label');
-        this.ringAudioMapper = new RingAudioMapper(VISUAL_SCENE_CONFIG.reactiveRingCount);
         this.lastReactiveLogTime = -Infinity;
 
         this.buildStaticScene();
@@ -656,7 +622,7 @@ class VisualizerEngine {
         this.systems = {
             background: new BackgroundSystem(this.scene),
             pitchBands: new PitchBandSystem(this.scene),
-            rings: new RingSystem(this.scene),
+            rings: new LiveRingSystem(this.scene),
             axis: new AxisSystem(this.scene),
             camera: new CameraSystem(this.camera)
         };
@@ -725,35 +691,40 @@ class VisualizerEngine {
             this.audio.updateTime(dt);
         }
         const sm = this.audio?.smoothed || null;
-        const reactiveState = this.ringAudioMapper.map({
+        const liveState = this.systems.rings.mapLiveRingState({
             pitchNorm: sm?.pitchNorm ?? 0,
             loudNorm: sm?.loudNorm ?? 0,
             pitchConf: sm?.pitchConf ?? 0,
             onset: sm?.onset ?? 0,
-            transientFlash: this.audio?.transientFlash ?? 0
+            transientFlash: this.audio?.transientFlash ?? 0,
+            centroidNorm: sm?.centroidNorm ?? 0.5
         });
         if (this.orbitControls) {
             this.orbitControls.update();
         }
         Object.entries(this.systems).forEach(([key, system]) => {
             if (key === 'rings') {
-                system.update(elapsed, reactiveState);
+                system.update(elapsed, liveState);
                 return;
             }
             system.update(elapsed);
         });
-        this.debugReactiveProbe(elapsed, sm, reactiveState);
+        this.debugReactiveProbe(elapsed, sm, liveState);
         this.debugAnimationProbe(elapsed);
         this.renderer.render(this.scene, this.camera);
     }
 
-    debugReactiveProbe(elapsed, smoothedAudio, reactiveState) {
+    debugReactiveProbe(elapsed, smoothedAudio, liveState) {
         if (elapsed - this.lastReactiveLogTime < 1) {
             return;
         }
         const pitchNorm = smoothedAudio?.pitchNorm ?? 0;
-        const activationLog = reactiveState.map((r) => Number((r.activation || 0).toFixed(3)));
-        console.debug(`[RingAudioMap] pitchNorm=${pitchNorm.toFixed(3)} activation=${JSON.stringify(activationLog)}`);
+        const stateLog = {
+            y: Number((liveState?.y ?? 0).toFixed(3)),
+            radius: Number((liveState?.radius ?? 0).toFixed(3)),
+            visibility: Number((liveState?.visibility ?? 0).toFixed(3))
+        };
+        console.debug(`[LiveRingMap] pitchNorm=${pitchNorm.toFixed(3)} state=${JSON.stringify(stateLog)}`);
         this.lastReactiveLogTime = elapsed;
     }
 
