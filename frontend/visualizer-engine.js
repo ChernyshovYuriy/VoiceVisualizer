@@ -2,6 +2,7 @@
 // Relies on globals: THREE.
 
 const VISUAL_SCENE_CONFIG = {
+    DEBUG_VIEW: false,
     backgroundTop: 0x0b1423,
     backgroundBottom: 0x030711,
     backgroundHaze: 0x112033,
@@ -15,7 +16,12 @@ const VISUAL_SCENE_CONFIG = {
     ringMotionSpeed: 0.52,
     ringThicknessMotion: 0.068,
     ringLuminanceMotion: 0.055,
-    ringRadiusMotion: 0.012
+    ringRadiusMotion: 0.012,
+    debugMotionMultiplier: {
+        thickness: 3.4,
+        luminance: 3.8,
+        radius: 4.6
+    }
 };
 
 class BackgroundSystem {
@@ -183,6 +189,7 @@ class RingSystem {
     constructor(scene) {
         this.group = new THREE.Group();
         scene.add(this.group);
+        this.isDebugView = Boolean(VISUAL_SCENE_CONFIG.DEBUG_VIEW);
 
         // 5 rings, back-to-front.
         //
@@ -213,9 +220,21 @@ class RingSystem {
                 luminanceAmp: def.luminanceAmp ?? (VISUAL_SCENE_CONFIG.ringLuminanceMotion * (0.74 + nearWeight * 0.50)),
                 radiusAmp: def.radiusAmp ?? (VISUAL_SCENE_CONFIG.ringRadiusMotion * (0.64 + nearWeight * 0.62))
             };
+            this.applyDebugMotionScale(motion);
 
             this.group.add(this.createRing(def, motion));
         });
+    }
+
+    applyDebugMotionScale(motion) {
+        if (!this.isDebugView) {
+            return;
+        }
+
+        const boost = VISUAL_SCENE_CONFIG.debugMotionMultiplier;
+        motion.thicknessAmp *= boost.thickness;
+        motion.luminanceAmp *= boost.luminance;
+        motion.radiusAmp *= boost.radius;
     }
 
     createRing(def, motion) {
@@ -503,8 +522,11 @@ class VisualizerEngine {
         this.camera = new THREE.PerspectiveCamera(32, window.innerWidth / window.innerHeight, 0.1, 100);
 
         this.clock = new THREE.Clock();
+        this.debugView = Boolean(VISUAL_SCENE_CONFIG.DEBUG_VIEW);
+        this.orbitControls = null;
 
         this.buildStaticScene();
+        this.setupDebugControls();
         this.bindEvents();
         this.animate();
     }
@@ -526,12 +548,36 @@ class VisualizerEngine {
             this.camera.aspect = width / height;
             this.camera.updateProjectionMatrix();
             this.renderer.setSize(width, height);
+            if (this.orbitControls) {
+                this.orbitControls.update();
+            }
             this.renderFrame();
         });
     }
 
+    setupDebugControls() {
+        if (!this.debugView || !THREE.OrbitControls) {
+            this.systems.camera.apply();
+            return;
+        }
+
+        this.orbitControls = new THREE.OrbitControls(this.camera, this.renderer.domElement);
+        this.orbitControls.enableRotate = true;
+        this.orbitControls.enableZoom = true;
+        this.orbitControls.enablePan = false;
+        this.orbitControls.target.copy(this.systems.camera.target);
+        this.orbitControls.minDistance = 3.2;
+        this.orbitControls.maxDistance = 14.0;
+        this.orbitControls.rotateSpeed = 0.8;
+        this.orbitControls.zoomSpeed = 0.9;
+        this.orbitControls.update();
+    }
+
     renderFrame() {
         const elapsed = this.clock.getElapsedTime();
+        if (this.orbitControls) {
+            this.orbitControls.update();
+        }
         Object.values(this.systems).forEach((system) => system.update(elapsed));
         this.renderer.render(this.scene, this.camera);
     }
