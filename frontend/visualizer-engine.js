@@ -1,8 +1,10 @@
 // Static ring-based baseline scene for Stage 1.
 // Relies on globals: THREE.
 
+const DEBUG_VIEW = false;
+
 const VISUAL_SCENE_CONFIG = {
-    DEBUG_VIEW: false,
+    DEBUG_VIEW,
     backgroundTop: 0x0b1423,
     backgroundBottom: 0x030711,
     backgroundHaze: 0x112033,
@@ -524,8 +526,11 @@ class VisualizerEngine {
         this.clock = new THREE.Clock();
         this.debugView = Boolean(VISUAL_SCENE_CONFIG.DEBUG_VIEW);
         this.orbitControls = null;
+        this.lastDebugLogTime = -Infinity;
+        this.debugLabel = document.getElementById('debug-camera-label');
 
         this.buildStaticScene();
+        this.setupDebugLabel();
         this.setupDebugControls();
         this.bindEvents();
         this.animate();
@@ -573,12 +578,37 @@ class VisualizerEngine {
         this.orbitControls.update();
     }
 
+    setupDebugLabel() {
+        if (!this.debugLabel) {
+            return;
+        }
+        this.debugLabel.style.display = this.debugView ? 'block' : 'none';
+    }
+
+    debugAnimationProbe(elapsed) {
+        if (!this.debugView || elapsed - this.lastDebugLogTime < 1) {
+            return;
+        }
+
+        const sampleMaterial = this.systems?.rings?.ringMaterials?.[0];
+        if (!sampleMaterial) {
+            return;
+        }
+
+        const uniforms = sampleMaterial.uniforms;
+        const t = elapsed * uniforms.uSpeed.value + uniforms.uPhase.value;
+        const radiusAnimated = uniforms.uRadius.value * (1 + uniforms.uRadiusAmp.value * Math.sin(t * 0.73 + 1.4));
+        console.debug(`[DEBUG_VIEW] t=${elapsed.toFixed(2)}s ring0Radius=${radiusAnimated.toFixed(4)}`);
+        this.lastDebugLogTime = elapsed;
+    }
+
     renderFrame() {
         const elapsed = this.clock.getElapsedTime();
         if (this.orbitControls) {
             this.orbitControls.update();
         }
         Object.values(this.systems).forEach((system) => system.update(elapsed));
+        this.debugAnimationProbe(elapsed);
         this.renderer.render(this.scene, this.camera);
     }
 
