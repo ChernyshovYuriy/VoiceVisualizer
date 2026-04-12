@@ -5,10 +5,6 @@ const VISUAL_SCENE_CONFIG = {
     backgroundTop: 0x0b1423,
     backgroundBottom: 0x030711,
     backgroundHaze: 0x112033,
-    ringThickness: 0.34,
-    ringGlow: 0.46,
-    ringOpacity: 0.58,
-    ringEchoCount: 2,
     bandOpacity: 0.2,
     bandSoftness: 1.34,
     axisOpacity: 0.07,
@@ -185,12 +181,22 @@ class RingSystem {
         this.group = new THREE.Group();
         scene.add(this.group);
 
+        // 6 rings, ordered back-to-front so near rings composite over far ones.
+        //
+        // sigma      — Gaussian half-width of the luminous band, world units.
+        //              Defined as a physical size; perspective projection handles
+        //              apparent screen thinning for distant rings automatically.
+        // maxOpacity — peak alpha at the ring centerline (core pass).
+        // haloOpacity— peak alpha for the additive halo pass.
+        // color      — dark base color; luminance is applied via the profile
+        //              multiplier inside the shader, not via a bright hex value.
         const ringDefinitions = [
-            { y: 1.32, z: -2.15, radius: 0.66, thicknessMul: 0.6, opacityMul: 0.4, color: 0x7b8ea1 },
-            { y: 0.68, z: -1.5, radius: 0.84, thicknessMul: 0.78, opacityMul: 0.58, color: 0x6d857a },
-            { y: 0.04, z: -0.84, radius: 1.02, thicknessMul: 0.92, opacityMul: 0.74, color: 0x7b916f },
-            { y: -0.62, z: -0.16, radius: 1.2, thicknessMul: 1.08, opacityMul: 0.9, color: 0xb89159 },
-            { y: -1.22, z: 0.5, radius: 1.4, thicknessMul: 1.24, opacityMul: 1.0, color: 0xaf7f4d }
+            { y:  1.60, z: -3.20, r: 0.52, sigma: 0.045, maxOpacity: 0.18, haloOpacity: 0.04, color: 0x3a4a58 },
+            { y:  1.10, z: -2.50, r: 0.74, sigma: 0.058, maxOpacity: 0.28, haloOpacity: 0.06, color: 0x4a5040 },
+            { y:  0.48, z: -1.70, r: 1.00, sigma: 0.074, maxOpacity: 0.42, haloOpacity: 0.07, color: 0x5a5245 },
+            { y: -0.22, z: -0.88, r: 1.28, sigma: 0.096, maxOpacity: 0.58, haloOpacity: 0.09, color: 0x6e5a38 },
+            { y: -0.86, z: -0.18, r: 1.58, sigma: 0.124, maxOpacity: 0.74, haloOpacity: 0.10, color: 0x7a5530 },
+            { y: -1.40, z:  0.42, r: 1.92, sigma: 0.160, maxOpacity: 0.92, haloOpacity: 0.12, color: 0x8a6030 },
         ];
 
         ringDefinitions.forEach((def) => {
@@ -199,126 +205,188 @@ class RingSystem {
     }
 
     createRing(def) {
-        const ringGroup = new THREE.Group();
-        ringGroup.position.set(0, def.y, def.z);
+        const group = new THREE.Group();
+        group.position.set(0, def.y, def.z);
 
-        const thickness = VISUAL_SCENE_CONFIG.ringThickness * def.thicknessMul;
-        const sigma = Math.max(thickness * 0.55, 0.001);
-        const extent = def.radius + thickness * 3.8;
+        const baseColor = new THREE.Color(def.color);
 
-        const corePass = this.createRingPass({
-            baseColor: new THREE.Color(def.color),
-            radius: def.radius,
-            sigma,
-            opacity: VISUAL_SCENE_CONFIG.ringOpacity * def.opacityMul,
-            glow: VISUAL_SCENE_CONFIG.ringGlow,
-            extent,
-            blendMode: THREE.NormalBlending,
-            yOffset: 0.0,
-            scaleX: 1.0,
-            scaleY: 0.7,
-            halo: 0.0
-        });
+        // Quad size: covers ring radius + worst-case halo reach (sigma * 3.5 * 3.5 = ~12×sigma).
+        // Any fragment beyond 3*sigma_halo contributes < 1% and is discarded in the shader.
+        const haloReach = def.sigma * 3.5 * 3.5;
+        const extent    = def.r + haloReach;
 
-        const haloPass = this.createRingPass({
-            baseColor: new THREE.Color(def.color),
-            radius: def.radius,
-            sigma: sigma * 1.85,
-            opacity: VISUAL_SCENE_CONFIG.ringOpacity * def.opacityMul * 0.52,
-            glow: VISUAL_SCENE_CONFIG.ringGlow,
-            extent,
-            blendMode: THREE.AdditiveBlending,
-            yOffset: 0.01,
-            scaleX: 1.015,
-            scaleY: 0.715,
-            halo: 1.0
-        });
-
-        ringGroup.add(corePass);
-        ringGroup.add(haloPass);
-        return ringGroup;
-    }
-
-    createRingPass(params) {
-        const material = new THREE.ShaderMaterial({
+        // ------------------------------------------------------------------
+        // PASS 1 — CORE  (NormalBlending)
+        //
+        // Single Gaussian: profile = exp(-d²/2σ²) where d = |dist_from_centerline|.
+        // No smoothstep. No stacked luminance bands. No hard edges.
+        //
+        // Luminance:  baseColor * (0.40 + 0.60 * profile)
+        //             → dim at falloff edge, full-bright only at centerline.
+        // Saturation: mix(0.12, 0.78, dF)
+        //             → primary depth cue; far rings read near-grey.
+        // Depth:      dF = exp(-|viewZ| * 0.088)
+        //             → exponential, not linear; range ~[0.42, 0.58] across stack.
+        // Alpha:      profile * maxOpacity * dF, hard cap 0.88.
+        // ------------------------------------------------------------------
+        const coreMat = new THREE.ShaderMaterial({
             transparent: true,
             depthWrite: false,
             depthTest: true,
-            blending: params.blendMode,
+            blending: THREE.NormalBlending,
             side: THREE.DoubleSide,
             uniforms: {
-                uBaseColor: { value: params.baseColor.clone() },
-                uRadius: { value: params.radius },
-                uSigma: { value: params.sigma },
-                uOpacity: { value: params.opacity },
-                uGlow: { value: params.glow },
-                uDepthK: { value: VISUAL_SCENE_CONFIG.depthAttenuation },
-                uExtent: { value: params.extent },
-                uHalo: { value: params.halo }
+                uBaseColor:  { value: baseColor.clone() },
+                uRadius:     { value: def.r },
+                uSigma:      { value: def.sigma },
+                uMaxOpacity: { value: def.maxOpacity },
             },
             vertexShader: `
-                varying vec2 vLocal;
-                varying float vViewDepth;
+                varying vec2  vLocal;
+                varying float vViewZ;
                 void main() {
                     vec4 world = modelMatrix * vec4(position, 1.0);
-                    vec4 view = viewMatrix * world;
+                    vec4 view  = viewMatrix * world;
                     vLocal = position.xy;
-                    vViewDepth = abs(view.z);
+                    vViewZ = abs(view.z);
                     gl_Position = projectionMatrix * view;
                 }
             `,
             fragmentShader: `
-                varying vec2 vLocal;
-                varying float vViewDepth;
-                uniform vec3 uBaseColor;
+                varying vec2  vLocal;
+                varying float vViewZ;
+                uniform vec3  uBaseColor;
                 uniform float uRadius;
                 uniform float uSigma;
-                uniform float uOpacity;
-                uniform float uGlow;
-                uniform float uDepthK;
-                uniform float uExtent;
-                uniform float uHalo;
+                uniform float uMaxOpacity;
 
                 vec3 applySaturation(vec3 color, float sat) {
-                    float l = dot(color, vec3(0.299, 0.587, 0.114));
-                    return mix(vec3(l), color, sat);
-                }
-
-                float gaussianProfile(float d, float sigma) {
-                    return exp(-(d * d) / (2.0 * sigma * sigma));
+                    float lum = dot(color, vec3(0.299, 0.587, 0.114));
+                    return mix(vec3(lum), color, sat);
                 }
 
                 void main() {
-                    vec2 p = vLocal / max(uExtent, 0.001);
-                    float ellipseRadius = length(vec2(p.x, p.y * 1.08)) * uExtent;
-                    float distanceToRing = abs(ellipseRadius - uRadius);
+                    // Circular distance in local XY.
+                    // The ring plane is horizontal (rotation.x = -PI/2); perspective
+                    // naturally produces ellipses — no manual Y warp needed or wanted.
+                    float d            = length(vLocal);
+                    float distFromEdge = abs(d - uRadius);
 
-                    float profile = gaussianProfile(distanceToRing, max(uSigma, 0.0001));
-                    if (profile < 0.001) {
-                        discard;
-                    }
+                    // One Gaussian. No plateaus, no shoulders, no hard cutoffs.
+                    float profile = exp(-(distFromEdge * distFromEdge) / (2.0 * uSigma * uSigma));
+                    if (profile < 0.005) discard;
 
-                    float distanceFactor = clamp(1.0 - vViewDepth * uDepthK, 0.2, 1.0);
-                    float alpha = profile * uOpacity * (0.62 + 0.26 * uGlow);
-                    alpha *= mix(1.0, 0.8, uHalo);
-                    alpha *= distanceFactor;
-                    alpha = min(alpha, 0.68);
+                    // Exponential depth factor.
+                    // Ring 5 at viewZ≈6.28 → dF≈0.575
+                    // Ring 0 at viewZ≈9.90 → dF≈0.418
+                    float dF = exp(-vViewZ * 0.088);
 
-                    vec3 color = uBaseColor * (0.5 + 0.5 * profile);
-                    color = applySaturation(color, mix(0.44, 1.0, distanceFactor));
-                    color *= mix(0.55, 0.95, distanceFactor);
+                    // Saturation is the primary depth cue — drops aggressively.
+                    // At dF=0.418 (far): sat=0.19. At dF=0.575 (near): sat=0.38.
+                    float sat   = mix(0.12, 0.78, dF);
+                    vec3  color = uBaseColor * (0.40 + 0.60 * profile);
+                    color       = applySaturation(color, sat);
+
+                    float alpha = profile * uMaxOpacity * dF;
+                    alpha = min(alpha, 0.88);
 
                     gl_FragColor = vec4(color, alpha);
                 }
             `
         });
 
-        const geometry = new THREE.PlaneGeometry(params.extent * 2.0, params.extent * 2.0, 1, 1);
-        const ringMesh = new THREE.Mesh(geometry, material);
-        ringMesh.rotation.x = -Math.PI / 2;
-        ringMesh.position.y = params.yOffset;
-        ringMesh.scale.set(params.scaleX, params.scaleY, 1.0);
-        return ringMesh;
+        const coreMesh = new THREE.Mesh(
+            new THREE.PlaneGeometry(extent * 2.0, extent * 2.0, 1, 1),
+            coreMat
+        );
+        coreMesh.rotation.x = -Math.PI / 2;
+        group.add(coreMesh);
+
+        // ------------------------------------------------------------------
+        // PASS 2 — HALO  (AdditiveBlending)
+        //
+        // Wider Gaussian representing light scattered into surrounding space.
+        //
+        // sigmaHalo = sigmaCore * mix(2.2, 3.5, dF)
+        //   Near rings (dF=0.575) → multiplier=2.95 → looser, wider glow.
+        //   Far  rings (dF=0.418) → multiplier=2.74 → tighter, more focused.
+        //
+        // Asymmetric falloff: inward side uses sigmaHalo * 0.55.
+        //   A real emissive torus scatters more light into open space (outside)
+        //   than toward the hollow center (inside). This reproduces that behavior.
+        //
+        // Alpha: profile * haloOpacity * dF  (no cap — additive so it won't clip).
+        // ------------------------------------------------------------------
+        const haloMat = new THREE.ShaderMaterial({
+            transparent: true,
+            depthWrite: false,
+            depthTest: true,
+            blending: THREE.AdditiveBlending,
+            side: THREE.DoubleSide,
+            uniforms: {
+                uBaseColor:   { value: baseColor.clone() },
+                uRadius:      { value: def.r },
+                uSigmaCore:   { value: def.sigma },
+                uHaloOpacity: { value: def.haloOpacity },
+            },
+            vertexShader: `
+                varying vec2  vLocal;
+                varying float vViewZ;
+                void main() {
+                    vec4 world = modelMatrix * vec4(position, 1.0);
+                    vec4 view  = viewMatrix * world;
+                    vLocal = position.xy;
+                    vViewZ = abs(view.z);
+                    gl_Position = projectionMatrix * view;
+                }
+            `,
+            fragmentShader: `
+                varying vec2  vLocal;
+                varying float vViewZ;
+                uniform vec3  uBaseColor;
+                uniform float uRadius;
+                uniform float uSigmaCore;
+                uniform float uHaloOpacity;
+
+                vec3 applySaturation(vec3 color, float sat) {
+                    float lum = dot(color, vec3(0.299, 0.587, 0.114));
+                    return mix(vec3(lum), color, sat);
+                }
+
+                void main() {
+                    float d          = length(vLocal);
+                    // Signed: positive = outside the ring, negative = inside the hollow.
+                    float signedDist = d - uRadius;
+
+                    float dF = exp(-vViewZ * 0.088);
+
+                    // Halo width grows toward the camera.
+                    float sigmaHalo = uSigmaCore * mix(2.2, 3.5, dF);
+                    // Inward side is tighter — glow radiates into open space, not inward.
+                    float sigmaUsed = (signedDist >= 0.0) ? sigmaHalo : sigmaHalo * 0.55;
+
+                    float profile = exp(-(signedDist * signedDist) / (2.0 * sigmaUsed * sigmaUsed));
+                    if (profile < 0.004) discard;
+
+                    // Halo saturation — slightly lower than core at same depth.
+                    float sat   = mix(0.08, 0.65, dF);
+                    vec3  color = applySaturation(uBaseColor, sat);
+
+                    float alpha = profile * uHaloOpacity * dF;
+
+                    gl_FragColor = vec4(color, alpha);
+                }
+            `
+        });
+
+        const haloMesh = new THREE.Mesh(
+            new THREE.PlaneGeometry(extent * 2.0, extent * 2.0, 1, 1),
+            haloMat
+        );
+        haloMesh.rotation.x = -Math.PI / 2;
+        group.add(haloMesh);
+
+        return group;
     }
 
     update() {}
