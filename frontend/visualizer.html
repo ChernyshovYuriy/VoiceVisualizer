@@ -142,13 +142,6 @@
 </div>
 
 <script src="https://unpkg.com/three@0.128.0/build/three.min.js"></script>
-<script src="https://unpkg.com/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
-<script src="https://unpkg.com/three@0.128.0/examples/js/shaders/CopyShader.js"></script>
-<script src="https://unpkg.com/three@0.128.0/examples/js/shaders/LuminosityHighPassShader.js"></script>
-<script src="https://unpkg.com/three@0.128.0/examples/js/postprocessing/EffectComposer.js"></script>
-<script src="https://unpkg.com/three@0.128.0/examples/js/postprocessing/RenderPass.js"></script>
-<script src="https://unpkg.com/three@0.128.0/examples/js/postprocessing/ShaderPass.js"></script>
-<script src="https://unpkg.com/three@0.128.0/examples/js/postprocessing/UnrealBloomPass.js"></script>
 
 <script>
     /**
@@ -158,10 +151,7 @@
      */
     const CONFIG = {
         wsUrl: 'ws://localhost:8765',
-        spine: { rings: 48, segs: 14, minH: 1.6, maxH: 4.2 },
-        bands: 16,
-        particles: { plasma: 120000, aura: 180000, wisp: 60000 },
-        ribbons: { count: 40, segs: 80 }
+        bands: 16
     };
 
     const MathUtils = {

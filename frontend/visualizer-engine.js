@@ -10,9 +10,6 @@ const VISUAL_SCENE_CONFIG = {
     bandOpacity: 0.1,
     axisOpacity: 0.22,
     cameraDistance: 7.4,
-    bloomStrength: 0.08,
-    bloomRadius: 0.15,
-    bloomThreshold: 0.92,
     pitchBandCount: 7
 };
 
@@ -241,16 +238,6 @@ class VisualizerEngine {
         this.scene = new THREE.Scene();
         this.camera = new THREE.PerspectiveCamera(32, window.innerWidth / window.innerHeight, 0.1, 100);
 
-        this.composer = new THREE.EffectComposer(this.renderer);
-        this.composer.addPass(new THREE.RenderPass(this.scene, this.camera));
-        this.bloomPass = new THREE.UnrealBloomPass(
-            new THREE.Vector2(window.innerWidth, window.innerHeight),
-            VISUAL_SCENE_CONFIG.bloomStrength,
-            VISUAL_SCENE_CONFIG.bloomRadius,
-            VISUAL_SCENE_CONFIG.bloomThreshold
-        );
-        this.composer.addPass(this.bloomPass);
-
         this.buildStaticScene();
         this.bindEvents();
         this.renderStaticFrame();
@@ -273,15 +260,13 @@ class VisualizerEngine {
             this.camera.aspect = width / height;
             this.camera.updateProjectionMatrix();
             this.renderer.setSize(width, height);
-            this.composer.setSize(width, height);
-            this.bloomPass.resolution.set(width, height);
             this.renderStaticFrame();
         });
     }
 
     renderStaticFrame() {
         Object.values(this.systems).forEach((system) => system.update());
-        this.composer.render();
+        this.renderer.render(this.scene, this.camera);
     }
 }
 
