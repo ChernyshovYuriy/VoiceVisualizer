@@ -11,7 +11,11 @@ const VISUAL_SCENE_CONFIG = {
     axisHeight: 2.35,
     cameraDistance: 6.7,
     depthAttenuation: 0.14,
-    pitchBandCount: 7
+    pitchBandCount: 7,
+    ringMotionSpeed: 0.52,
+    ringThicknessMotion: 0.068,
+    ringLuminanceMotion: 0.055,
+    ringRadiusMotion: 0.012
 };
 
 class BackgroundSystem {
@@ -189,6 +193,8 @@ class RingSystem {
         //               centerline reads as a sharp luminous tube, not a soft band.
         // coreOpacity  — peak alpha at centerline. Near-opaque to produce solid neon.
         // haloOpacity  — peak alpha of the wide additive bloom pass.
+        this.ringMaterials = [];
+
         const ringDefinitions = [
             { y:  1.32, z: -2.15, r: 0.66, sigma: 0.022, coreOpacity: 0.82, haloOpacity: 0.35, color: 0x00ccff },
             { y:  0.68, z: -1.50, r: 0.88, sigma: 0.026, coreOpacity: 0.88, haloOpacity: 0.40, color: 0x00ffcc },
@@ -197,12 +203,22 @@ class RingSystem {
             { y: -1.22, z:  0.50, r: 1.75, sigma: 0.044, coreOpacity: 0.96, haloOpacity: 0.52, color: 0xff5500 },
         ];
 
-        ringDefinitions.forEach((def) => {
-            this.group.add(this.createRing(def));
+        const ringCount = ringDefinitions.length;
+        ringDefinitions.forEach((def, index) => {
+            const nearWeight = index / (ringCount - 1);
+            const motion = {
+                phase: 0.65 + index * 1.17,
+                speed: VISUAL_SCENE_CONFIG.ringMotionSpeed * (0.92 + nearWeight * 0.22),
+                thicknessAmp: def.thicknessAmp ?? (VISUAL_SCENE_CONFIG.ringThicknessMotion * (0.76 + nearWeight * 0.48)),
+                luminanceAmp: def.luminanceAmp ?? (VISUAL_SCENE_CONFIG.ringLuminanceMotion * (0.74 + nearWeight * 0.50)),
+                radiusAmp: def.radiusAmp ?? (VISUAL_SCENE_CONFIG.ringRadiusMotion * (0.64 + nearWeight * 0.62))
+            };
+
+            this.group.add(this.createRing(def, motion));
         });
     }
 
-    createRing(def) {
+    createRing(def, motion) {
         const group = new THREE.Group();
         group.position.set(0, def.y, def.z);
 
@@ -240,6 +256,12 @@ class RingSystem {
                 uRadius:     { value: def.r },
                 uSigma:      { value: def.sigma },
                 uMaxOpacity: { value: def.coreOpacity },
+                uTime:       { value: 0 },
+                uPhase:      { value: motion.phase },
+                uSpeed:      { value: motion.speed },
+                uThicknessAmp: { value: motion.thicknessAmp },
+                uLuminanceAmp: { value: motion.luminanceAmp },
+                uRadiusAmp:  { value: motion.radiusAmp },
             },
             vertexShader: `
                 varying vec2  vLocal;
@@ -259,11 +281,25 @@ class RingSystem {
                 uniform float uRadius;
                 uniform float uSigma;
                 uniform float uMaxOpacity;
+                uniform float uTime;
+                uniform float uPhase;
+                uniform float uSpeed;
+                uniform float uThicknessAmp;
+                uniform float uLuminanceAmp;
+                uniform float uRadiusAmp;
 
                 void main() {
+                    float t = uTime * uSpeed + uPhase;
+                    float breath = sin(t);
+                    float shimmer = sin(t * 1.31 + 0.7);
+                    float drift = sin(t * 0.73 + 1.4);
+
+                    float modSigma = uSigma * (1.0 + uThicknessAmp * breath);
+                    float modRadius = uRadius * (1.0 + uRadiusAmp * drift);
+
                     float d       = length(vLocal);
-                    float dist    = abs(d - uRadius);
-                    float profile = exp(-(dist * dist) / (2.0 * uSigma * uSigma));
+                    float dist    = abs(d - modRadius);
+                    float profile = exp(-(dist * dist) / (2.0 * modSigma * modSigma));
 
                     if (profile < 0.005) discard;
 
@@ -272,7 +308,8 @@ class RingSystem {
                     float alpha = profile * uMaxOpacity * dF;
                     alpha = min(alpha, 0.96);
 
-                    vec3 color = uBaseColor * (0.70 + 0.30 * profile);
+                    float luminance = 1.0 + uLuminanceAmp * shimmer;
+                    vec3 color = uBaseColor * (0.70 + 0.30 * profile) * luminance;
 
                     gl_FragColor = vec4(color, alpha);
                 }
@@ -285,6 +322,7 @@ class RingSystem {
         );
         coreMesh.rotation.x = -Math.PI / 2;
         group.add(coreMesh);
+        this.ringMaterials.push(coreMat);
 
         // -----------------------------------------------------------------
         // PASS 2 — BLOOM HALO  (AdditiveBlending)
@@ -313,6 +351,12 @@ class RingSystem {
                 uRadius:      { value: def.r },
                 uHaloSigma:   { value: haloSigma },
                 uHaloOpacity: { value: def.haloOpacity },
+                uTime:        { value: 0 },
+                uPhase:       { value: motion.phase + 0.18 },
+                uSpeed:       { value: motion.speed * 0.95 },
+                uThicknessAmp:{ value: motion.thicknessAmp * 0.55 },
+                uLuminanceAmp:{ value: motion.luminanceAmp * 0.6 },
+                uRadiusAmp:   { value: motion.radiusAmp * 0.8 },
             },
             vertexShader: `
                 varying vec2  vLocal;
@@ -332,13 +376,27 @@ class RingSystem {
                 uniform float uRadius;
                 uniform float uHaloSigma;
                 uniform float uHaloOpacity;
+                uniform float uTime;
+                uniform float uPhase;
+                uniform float uSpeed;
+                uniform float uThicknessAmp;
+                uniform float uLuminanceAmp;
+                uniform float uRadiusAmp;
 
                 void main() {
+                    float t = uTime * uSpeed + uPhase;
+                    float breath = sin(t * 0.92);
+                    float shimmer = sin(t * 1.17 + 0.4);
+                    float drift = sin(t * 0.68 + 1.1);
+
+                    float modSigmaBase = uHaloSigma * (1.0 + uThicknessAmp * breath);
+                    float modRadius = uRadius * (1.0 + uRadiusAmp * drift);
+
                     float d          = length(vLocal);
-                    float signedDist = d - uRadius;
+                    float signedDist = d - modRadius;
 
                     // Asymmetric: outward = full sigma, inward = 55%
-                    float sigma   = (signedDist >= 0.0) ? uHaloSigma : uHaloSigma * 0.55;
+                    float sigma   = (signedDist >= 0.0) ? modSigmaBase : modSigmaBase * 0.55;
                     float profile = exp(-(signedDist * signedDist) / (2.0 * sigma * sigma));
 
                     if (profile < 0.003) discard;
@@ -348,7 +406,8 @@ class RingSystem {
 
                     // Halo color: same hue, slightly dimmer than core so the
                     // centerline still reads as the brightest point.
-                    vec3 color = uBaseColor * 0.85;
+                    float luminance = 1.0 + uLuminanceAmp * shimmer;
+                    vec3 color = uBaseColor * 0.85 * luminance;
 
                     gl_FragColor = vec4(color, alpha);
                 }
@@ -361,11 +420,16 @@ class RingSystem {
         );
         haloMesh.rotation.x = -Math.PI / 2;
         group.add(haloMesh);
+        this.ringMaterials.push(haloMat);
 
         return group;
     }
 
-    update() {}
+    update(timeSeconds = 0) {
+        for (const material of this.ringMaterials) {
+            material.uniforms.uTime.value = timeSeconds;
+        }
+    }
 }
 
 class AxisSystem {
@@ -438,9 +502,11 @@ class VisualizerEngine {
         this.scene = new THREE.Scene();
         this.camera = new THREE.PerspectiveCamera(32, window.innerWidth / window.innerHeight, 0.1, 100);
 
+        this.clock = new THREE.Clock();
+
         this.buildStaticScene();
         this.bindEvents();
-        this.renderStaticFrame();
+        this.animate();
     }
 
     buildStaticScene() {
@@ -460,13 +526,19 @@ class VisualizerEngine {
             this.camera.aspect = width / height;
             this.camera.updateProjectionMatrix();
             this.renderer.setSize(width, height);
-            this.renderStaticFrame();
+            this.renderFrame();
         });
     }
 
-    renderStaticFrame() {
-        Object.values(this.systems).forEach((system) => system.update());
+    renderFrame() {
+        const elapsed = this.clock.getElapsedTime();
+        Object.values(this.systems).forEach((system) => system.update(elapsed));
         this.renderer.render(this.scene, this.camera);
+    }
+
+    animate() {
+        this.renderFrame();
+        requestAnimationFrame(() => this.animate());
     }
 }
 
