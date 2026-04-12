@@ -186,11 +186,11 @@ class RingSystem {
         scene.add(this.group);
 
         const ringDefinitions = [
-            { y: 1.35, z: -2.2, r: 0.66, thicknessMul: 0.5, opacityMul: 0.32, glowMul: 0.37, color: 0x8499ab },
-            { y: 0.72, z: -1.58, r: 0.84, thicknessMul: 0.64, opacityMul: 0.5, glowMul: 0.48, color: 0x688779 },
-            { y: 0.06, z: -0.88, r: 1.0, thicknessMul: 0.84, opacityMul: 0.7, glowMul: 0.62, color: 0x74906b },
-            { y: -0.62, z: -0.18, r: 1.19, thicknessMul: 1.04, opacityMul: 0.93, glowMul: 0.8, color: 0xc59956 },
-            { y: -1.24, z: 0.5, r: 1.42, thicknessMul: 1.28, opacityMul: 1.15, glowMul: 1.0, color: 0xbc8350 }
+            { y: 1.32, z: -2.15, radius: 0.66, thicknessMul: 0.6, opacityMul: 0.4, color: 0x7b8ea1 },
+            { y: 0.68, z: -1.5, radius: 0.84, thicknessMul: 0.78, opacityMul: 0.58, color: 0x6d857a },
+            { y: 0.04, z: -0.84, radius: 1.02, thicknessMul: 0.92, opacityMul: 0.74, color: 0x7b916f },
+            { y: -0.62, z: -0.16, radius: 1.2, thicknessMul: 1.08, opacityMul: 0.9, color: 0xb89159 },
+            { y: -1.22, z: 0.5, radius: 1.4, thicknessMul: 1.24, opacityMul: 1.0, color: 0xaf7f4d }
         ];
 
         ringDefinitions.forEach((def) => {
@@ -199,98 +199,126 @@ class RingSystem {
     }
 
     createRing(def) {
-        const group = new THREE.Group();
-        group.position.set(0, def.y, def.z);
+        const ringGroup = new THREE.Group();
+        ringGroup.position.set(0, def.y, def.z);
 
         const thickness = VISUAL_SCENE_CONFIG.ringThickness * def.thicknessMul;
-        const baseColor = new THREE.Color(def.color);
+        const sigma = Math.max(thickness * 0.55, 0.001);
+        const extent = def.radius + thickness * 3.8;
 
-        const layers = [
-            { radiusOffset: 0.0, thicknessMul: 0.76, opacityMul: 1.0, glowMul: 1.0, blend: THREE.NormalBlending, yOff: 0.0, scaleX: 1.0, scaleY: 0.69 },
-            { radiusOffset: -0.022, thicknessMul: 0.46, opacityMul: 0.54, glowMul: 0.86, blend: THREE.AdditiveBlending, yOff: 0.014, scaleX: 0.985, scaleY: 0.675 },
-            { radiusOffset: 0.045, thicknessMul: 1.14, opacityMul: 0.28, glowMul: 0.58, blend: THREE.AdditiveBlending, yOff: -0.02, scaleX: 1.045, scaleY: 0.715 }
-        ];
-
-        layers.slice(0, VISUAL_SCENE_CONFIG.ringEchoCount + 1).forEach((layer) => {
-            const mat = new THREE.ShaderMaterial({
-                transparent: true,
-                depthWrite: false,
-                depthTest: true,
-                blending: layer.blend,
-                side: THREE.DoubleSide,
-                uniforms: {
-                    uBaseColor: { value: baseColor.clone() },
-                    uRadius: { value: def.r + layer.radiusOffset },
-                    uThickness: { value: thickness * layer.thicknessMul },
-                    uOpacity: { value: VISUAL_SCENE_CONFIG.ringOpacity * def.opacityMul * layer.opacityMul },
-                    uGlow: { value: VISUAL_SCENE_CONFIG.ringGlow * def.glowMul * layer.glowMul },
-                    uDepthK: { value: VISUAL_SCENE_CONFIG.depthAttenuation },
-                    uExtent: { value: def.r + thickness * 2.8 }
-                },
-                vertexShader: `
-                    varying vec2 vLocal;
-                    varying float vViewDepth;
-                    void main() {
-                        vec4 world = modelMatrix * vec4(position, 1.0);
-                        vec4 view = viewMatrix * world;
-                        vLocal = position.xy;
-                        vViewDepth = abs(view.z);
-                        gl_Position = projectionMatrix * view;
-                    }
-                `,
-                fragmentShader: `
-                    varying vec2 vLocal;
-                    varying float vViewDepth;
-                    uniform vec3 uBaseColor;
-                    uniform float uRadius;
-                    uniform float uThickness;
-                    uniform float uOpacity;
-                    uniform float uGlow;
-                    uniform float uDepthK;
-                    uniform float uExtent;
-
-                    vec3 applySaturation(vec3 color, float sat) {
-                        float l = dot(color, vec3(0.299, 0.587, 0.114));
-                        return mix(vec3(l), color, sat);
-                    }
-
-                    void main() {
-                        vec2 p = (vLocal / max(uExtent, 0.001));
-                        float ellipseRadius = length(vec2(p.x, p.y * 1.08)) * uExtent;
-                        float distance = abs(ellipseRadius - uRadius);
-
-                        float edgeCore = smoothstep(uThickness * 0.24, 0.0, distance);
-                        float body = smoothstep(uThickness * 1.08, uThickness * 0.3, distance);
-                        float falloff = smoothstep(uThickness * 1.52, uThickness * 0.55, distance);
-                        float alphaBand = edgeCore * 0.75 + body * 0.55;
-                        alphaBand *= falloff;
-
-                        if (alphaBand < 0.001) {
-                            discard;
-                        }
-
-                        float distanceFactor = clamp(1.0 - vViewDepth * uDepthK, 0.2, 1.0);
-                        float alpha = alphaBand * uOpacity * (0.64 + 0.3 * uGlow) * distanceFactor;
-                        alpha = min(alpha, 0.72);
-
-                        vec3 color = uBaseColor * (0.55 + 0.38 * edgeCore + 0.12 * body);
-                        color = applySaturation(color, mix(0.42, 1.0, distanceFactor));
-                        color *= mix(0.52, 0.94, distanceFactor);
-
-                        gl_FragColor = vec4(color, alpha);
-                    }
-                `
-            });
-
-            const extent = def.r + thickness * 3.2;
-            const ringMesh = new THREE.Mesh(new THREE.PlaneGeometry(extent * 2.0, extent * 2.0, 1, 1), mat);
-            ringMesh.rotation.x = -Math.PI / 2;
-            ringMesh.position.y = layer.yOff;
-            ringMesh.scale.set(layer.scaleX, layer.scaleY, 1.0);
-            group.add(ringMesh);
+        const corePass = this.createRingPass({
+            baseColor: new THREE.Color(def.color),
+            radius: def.radius,
+            sigma,
+            opacity: VISUAL_SCENE_CONFIG.ringOpacity * def.opacityMul,
+            glow: VISUAL_SCENE_CONFIG.ringGlow,
+            extent,
+            blendMode: THREE.NormalBlending,
+            yOffset: 0.0,
+            scaleX: 1.0,
+            scaleY: 0.7,
+            halo: 0.0
         });
 
-        return group;
+        const haloPass = this.createRingPass({
+            baseColor: new THREE.Color(def.color),
+            radius: def.radius,
+            sigma: sigma * 1.85,
+            opacity: VISUAL_SCENE_CONFIG.ringOpacity * def.opacityMul * 0.52,
+            glow: VISUAL_SCENE_CONFIG.ringGlow,
+            extent,
+            blendMode: THREE.AdditiveBlending,
+            yOffset: 0.01,
+            scaleX: 1.015,
+            scaleY: 0.715,
+            halo: 1.0
+        });
+
+        ringGroup.add(corePass);
+        ringGroup.add(haloPass);
+        return ringGroup;
+    }
+
+    createRingPass(params) {
+        const material = new THREE.ShaderMaterial({
+            transparent: true,
+            depthWrite: false,
+            depthTest: true,
+            blending: params.blendMode,
+            side: THREE.DoubleSide,
+            uniforms: {
+                uBaseColor: { value: params.baseColor.clone() },
+                uRadius: { value: params.radius },
+                uSigma: { value: params.sigma },
+                uOpacity: { value: params.opacity },
+                uGlow: { value: params.glow },
+                uDepthK: { value: VISUAL_SCENE_CONFIG.depthAttenuation },
+                uExtent: { value: params.extent },
+                uHalo: { value: params.halo }
+            },
+            vertexShader: `
+                varying vec2 vLocal;
+                varying float vViewDepth;
+                void main() {
+                    vec4 world = modelMatrix * vec4(position, 1.0);
+                    vec4 view = viewMatrix * world;
+                    vLocal = position.xy;
+                    vViewDepth = abs(view.z);
+                    gl_Position = projectionMatrix * view;
+                }
+            `,
+            fragmentShader: `
+                varying vec2 vLocal;
+                varying float vViewDepth;
+                uniform vec3 uBaseColor;
+                uniform float uRadius;
+                uniform float uSigma;
+                uniform float uOpacity;
+                uniform float uGlow;
+                uniform float uDepthK;
+                uniform float uExtent;
+                uniform float uHalo;
+
+                vec3 applySaturation(vec3 color, float sat) {
+                    float l = dot(color, vec3(0.299, 0.587, 0.114));
+                    return mix(vec3(l), color, sat);
+                }
+
+                float gaussianProfile(float d, float sigma) {
+                    return exp(-(d * d) / (2.0 * sigma * sigma));
+                }
+
+                void main() {
+                    vec2 p = vLocal / max(uExtent, 0.001);
+                    float ellipseRadius = length(vec2(p.x, p.y * 1.08)) * uExtent;
+                    float distanceToRing = abs(ellipseRadius - uRadius);
+
+                    float profile = gaussianProfile(distanceToRing, max(uSigma, 0.0001));
+                    if (profile < 0.001) {
+                        discard;
+                    }
+
+                    float distanceFactor = clamp(1.0 - vViewDepth * uDepthK, 0.2, 1.0);
+                    float alpha = profile * uOpacity * (0.62 + 0.26 * uGlow);
+                    alpha *= mix(1.0, 0.8, uHalo);
+                    alpha *= distanceFactor;
+                    alpha = min(alpha, 0.68);
+
+                    vec3 color = uBaseColor * (0.5 + 0.5 * profile);
+                    color = applySaturation(color, mix(0.44, 1.0, distanceFactor));
+                    color *= mix(0.55, 0.95, distanceFactor);
+
+                    gl_FragColor = vec4(color, alpha);
+                }
+            `
+        });
+
+        const geometry = new THREE.PlaneGeometry(params.extent * 2.0, params.extent * 2.0, 1, 1);
+        const ringMesh = new THREE.Mesh(geometry, material);
+        ringMesh.rotation.x = -Math.PI / 2;
+        ringMesh.position.y = params.yOffset;
+        ringMesh.scale.set(params.scaleX, params.scaleY, 1.0);
+        return ringMesh;
     }
 
     update() {}
