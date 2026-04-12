@@ -23,8 +23,78 @@ const VISUAL_SCENE_CONFIG = {
         thickness: 3.4,
         luminance: 3.8,
         radius: 4.6
-    }
+    },
+    reactiveRingCount: 5,
+    ringActivationAttackBoost: 0.45,
+    ringActivationPitchConfFloor: 0.08
 };
+
+class RingAudioMapper {
+    constructor(ringCount = VISUAL_SCENE_CONFIG.reactiveRingCount) {
+        this.ringCount = ringCount;
+    }
+
+    createIdleState() {
+        return Array.from({ length: this.ringCount }, () => ({
+            activation: 0,
+            coreIntensity: 0,
+            haloIntensity: 0,
+            thicknessEmphasis: 0,
+            radiusEmphasis: 0
+        }));
+    }
+
+    map(audioState) {
+        const perRing = this.createIdleState();
+        if (!audioState) {
+            return perRing;
+        }
+
+        const pitchNorm = this.safeNorm(audioState.pitchNorm);
+        const loudNorm = this.safeNorm(audioState.loudNorm);
+        const pitchConf = this.safeNorm(audioState.pitchConf);
+        const onset = this.safeNorm(Math.max(audioState.transientFlash ?? 0, audioState.onset ?? 0));
+
+        const confidenceGate = Math.max(0, (pitchConf - VISUAL_SCENE_CONFIG.ringActivationPitchConfFloor) / (1 - VISUAL_SCENE_CONFIG.ringActivationPitchConfFloor));
+        if (confidenceGate <= 0 || loudNorm <= 0.001) {
+            return perRing;
+        }
+
+        const ringPosition = pitchNorm * (this.ringCount - 1);
+        const lowerIndex = Math.floor(ringPosition);
+        const upperIndex = Math.min(this.ringCount - 1, lowerIndex + 1);
+        const upperWeight = ringPosition - lowerIndex;
+        const lowerWeight = 1 - upperWeight;
+
+        const baseStrength = loudNorm * confidenceGate;
+        const attackBoost = onset * VISUAL_SCENE_CONFIG.ringActivationAttackBoost;
+
+        this.applyActivation(perRing, lowerIndex, lowerWeight, baseStrength, attackBoost);
+        if (upperIndex !== lowerIndex) {
+            this.applyActivation(perRing, upperIndex, upperWeight, baseStrength, attackBoost);
+        }
+
+        return perRing;
+    }
+
+    applyActivation(perRing, ringIndex, blendWeight, baseStrength, attackBoost) {
+        const activation = this.safeNorm((baseStrength + attackBoost) * blendWeight);
+        perRing[ringIndex] = {
+            activation,
+            coreIntensity: activation,
+            haloIntensity: this.safeNorm(activation * 0.84 + attackBoost * 0.20 * blendWeight),
+            thicknessEmphasis: activation * 0.14,
+            radiusEmphasis: activation * 0.06
+        };
+    }
+
+    safeNorm(value) {
+        if (!Number.isFinite(value)) {
+            return 0;
+        }
+        return Math.max(0, Math.min(1, value));
+    }
+}
 
 class BackgroundSystem {
     constructor(scene) {
@@ -203,6 +273,7 @@ class RingSystem {
         // coreOpacity  — peak alpha at centerline. Near-opaque to produce solid neon.
         // haloOpacity  — peak alpha of the wide additive bloom pass.
         this.ringMaterials = [];
+        this.ringEntries = [];
 
         const ringDefinitions = [
             { y:  1.32, z: -2.15, r: 0.66, sigma: 0.022, coreOpacity: 0.82, haloOpacity: 0.35, color: 0x00ccff },
@@ -442,13 +513,56 @@ class RingSystem {
         haloMesh.rotation.x = -Math.PI / 2;
         group.add(haloMesh);
         this.ringMaterials.push(haloMat);
+        this.ringEntries.push({
+            coreMat,
+            haloMat,
+            base: {
+                coreOpacity: def.coreOpacity,
+                haloOpacity: def.haloOpacity,
+                sigma: def.sigma,
+                haloSigma,
+                radius: def.r
+            },
+            reactive: {
+                activation: 0,
+                coreIntensity: 0,
+                haloIntensity: 0,
+                thicknessEmphasis: 0,
+                radiusEmphasis: 0
+            }
+        });
 
         return group;
     }
 
-    update(timeSeconds = 0) {
+    setReactiveState(perRingState = []) {
+        this.ringEntries.forEach((entry, index) => {
+            const ringState = perRingState[index] || {};
+            entry.reactive.activation = MathUtils.clamp(ringState.activation || 0, 0, 1);
+            entry.reactive.coreIntensity = MathUtils.clamp(ringState.coreIntensity || 0, 0, 1.5);
+            entry.reactive.haloIntensity = MathUtils.clamp(ringState.haloIntensity || 0, 0, 1.5);
+            entry.reactive.thicknessEmphasis = MathUtils.clamp(ringState.thicknessEmphasis || 0, 0, 0.35);
+            entry.reactive.radiusEmphasis = MathUtils.clamp(ringState.radiusEmphasis || 0, 0, 0.25);
+        });
+    }
+
+    update(timeSeconds = 0, audioState = null) {
         for (const material of this.ringMaterials) {
             material.uniforms.uTime.value = timeSeconds;
+        }
+
+        if (audioState) {
+            this.setReactiveState(audioState);
+        }
+
+        for (const entry of this.ringEntries) {
+            const reactive = entry.reactive;
+            entry.coreMat.uniforms.uMaxOpacity.value = entry.base.coreOpacity * (1 + reactive.coreIntensity * 1.35);
+            entry.haloMat.uniforms.uHaloOpacity.value = entry.base.haloOpacity * (1 + reactive.haloIntensity * 1.9);
+            entry.coreMat.uniforms.uSigma.value = entry.base.sigma * (1 + reactive.thicknessEmphasis);
+            entry.haloMat.uniforms.uHaloSigma.value = entry.base.haloSigma * (1 + reactive.thicknessEmphasis * 0.7);
+            entry.coreMat.uniforms.uRadius.value = entry.base.radius * (1 + reactive.radiusEmphasis);
+            entry.haloMat.uniforms.uRadius.value = entry.base.radius * (1 + reactive.radiusEmphasis * 0.85);
         }
     }
 }
@@ -528,6 +642,8 @@ class VisualizerEngine {
         this.orbitControls = null;
         this.lastDebugLogTime = -Infinity;
         this.debugLabel = document.getElementById('debug-camera-label');
+        this.ringAudioMapper = new RingAudioMapper(VISUAL_SCENE_CONFIG.reactiveRingCount);
+        this.lastReactiveLogTime = -Infinity;
 
         this.buildStaticScene();
         this.setupDebugLabel();
@@ -603,13 +719,42 @@ class VisualizerEngine {
     }
 
     renderFrame() {
-        const elapsed = this.clock.getElapsedTime();
+        const dt = this.clock.getDelta();
+        const elapsed = this.clock.elapsedTime;
+        if (this.audio?.updateTime) {
+            this.audio.updateTime(dt);
+        }
+        const sm = this.audio?.smoothed || null;
+        const reactiveState = this.ringAudioMapper.map({
+            pitchNorm: sm?.pitchNorm ?? 0,
+            loudNorm: sm?.loudNorm ?? 0,
+            pitchConf: sm?.pitchConf ?? 0,
+            onset: sm?.onset ?? 0,
+            transientFlash: this.audio?.transientFlash ?? 0
+        });
         if (this.orbitControls) {
             this.orbitControls.update();
         }
-        Object.values(this.systems).forEach((system) => system.update(elapsed));
+        Object.entries(this.systems).forEach(([key, system]) => {
+            if (key === 'rings') {
+                system.update(elapsed, reactiveState);
+                return;
+            }
+            system.update(elapsed);
+        });
+        this.debugReactiveProbe(elapsed, sm, reactiveState);
         this.debugAnimationProbe(elapsed);
         this.renderer.render(this.scene, this.camera);
+    }
+
+    debugReactiveProbe(elapsed, smoothedAudio, reactiveState) {
+        if (elapsed - this.lastReactiveLogTime < 1) {
+            return;
+        }
+        const pitchNorm = smoothedAudio?.pitchNorm ?? 0;
+        const activationLog = reactiveState.map((r) => Number((r.activation || 0).toFixed(3)));
+        console.debug(`[RingAudioMap] pitchNorm=${pitchNorm.toFixed(3)} activation=${JSON.stringify(activationLog)}`);
+        this.lastReactiveLogTime = elapsed;
     }
 
     animate() {
