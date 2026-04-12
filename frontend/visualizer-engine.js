@@ -4,12 +4,15 @@
 const VISUAL_SCENE_CONFIG = {
     backgroundTop: 0x0a1322,
     backgroundBottom: 0x02060d,
-    ringThickness: 0.11,
-    ringGlow: 0.32,
-    ringOpacity: 0.56,
-    bandOpacity: 0.1,
-    axisOpacity: 0.22,
-    cameraDistance: 7.4,
+    backgroundHaze: 0x101d2e,
+    ringThickness: 0.32,
+    ringGlow: 0.52,
+    ringOpacity: 0.64,
+    bandOpacity: 0.23,
+    bandSoftness: 1.25,
+    axisOpacity: 0.085,
+    axisHeight: 2.35,
+    cameraDistance: 6.45,
     pitchBandCount: 7
 };
 
@@ -20,17 +23,21 @@ class BackgroundSystem {
             side: THREE.BackSide,
             uniforms: {
                 uTop: { value: new THREE.Color(VISUAL_SCENE_CONFIG.backgroundTop) },
-                uBottom: { value: new THREE.Color(VISUAL_SCENE_CONFIG.backgroundBottom) }
+                uBottom: { value: new THREE.Color(VISUAL_SCENE_CONFIG.backgroundBottom) },
+                uHaze: { value: new THREE.Color(VISUAL_SCENE_CONFIG.backgroundHaze) }
             },
             vertexShader: `varying vec3 vWorldPos; void main(){ vec4 world = modelMatrix * vec4(position, 1.0); vWorldPos = world.xyz; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
             fragmentShader: `
                 varying vec3 vWorldPos;
                 uniform vec3 uTop;
                 uniform vec3 uBottom;
+                uniform vec3 uHaze;
                 void main(){
                     float h = clamp((vWorldPos.y + 6.0) / 12.0, 0.0, 1.0);
-                    float t = smoothstep(0.1, 0.85, h);
+                    float t = smoothstep(0.06, 0.9, h);
+                    float centerGlow = exp(-pow(vWorldPos.y * 0.16, 2.0)) * exp(-pow(vWorldPos.x * 0.09, 2.0));
                     vec3 col = mix(uBottom, uTop, t);
+                    col = mix(col, uHaze, centerGlow * 0.28);
                     gl_FragColor = vec4(col, 1.0);
                 }
             `
@@ -48,10 +55,10 @@ class PitchBandSystem {
         this.group = new THREE.Group();
         scene.add(this.group);
 
-        const yMin = -1.4;
-        const yMax = 1.8;
+        const yMin = -1.7;
+        const yMax = 2.05;
         const gap = (yMax - yMin) / (VISUAL_SCENE_CONFIG.pitchBandCount - 1);
-        const bandGeo = new THREE.PlaneGeometry(7.6, 0.62, 1, 1);
+        const bandGeo = new THREE.PlaneGeometry(9.2, 1.05, 1, 1);
 
         for (let i = 0; i < VISUAL_SCENE_CONFIG.pitchBandCount; i++) {
             const t = i / (VISUAL_SCENE_CONFIG.pitchBandCount - 1);
@@ -62,22 +69,26 @@ class PitchBandSystem {
                 blending: THREE.AdditiveBlending,
                 uniforms: {
                     uColor: { value: color },
-                    uOpacity: { value: VISUAL_SCENE_CONFIG.bandOpacity }
+                    uOpacity: { value: VISUAL_SCENE_CONFIG.bandOpacity },
+                    uSoftness: { value: VISUAL_SCENE_CONFIG.bandSoftness }
                 },
                 vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
                 fragmentShader: `
                     varying vec2 vUv;
                     uniform vec3 uColor;
                     uniform float uOpacity;
+                    uniform float uSoftness;
                     void main(){
-                        float verticalSoft = exp(-pow((vUv.y - 0.5) * 3.2, 2.0));
-                        float horizontalSoft = smoothstep(0.0, 0.24, vUv.x) * (1.0 - smoothstep(0.76, 1.0, vUv.x));
-                        gl_FragColor = vec4(uColor, verticalSoft * horizontalSoft * uOpacity);
+                        float verticalSoft = exp(-pow((vUv.y - 0.5) * 2.35 / uSoftness, 2.0));
+                        float horizontalCore = exp(-pow((vUv.x - 0.5) * 1.7, 2.0));
+                        float horizontalFade = smoothstep(0.0, 0.16, vUv.x) * (1.0 - smoothstep(0.84, 1.0, vUv.x));
+                        float alpha = verticalSoft * (horizontalCore * 0.85 + horizontalFade * 0.4) * uOpacity;
+                        gl_FragColor = vec4(uColor, alpha);
                     }
                 `
             });
             const band = new THREE.Mesh(bandGeo, mat);
-            band.position.set(0, yMin + i * gap, -0.9);
+            band.position.set(0, yMin + i * gap, -1.55);
             this.group.add(band);
         }
     }
@@ -111,11 +122,11 @@ class RingSystem {
         scene.add(this.group);
 
         const ringDefinitions = [
-            { y: -1.1, r: 0.72, color: 0xb27344 },
-            { y: -0.42, r: 1.05, color: 0xc89a56 },
-            { y: 0.15, r: 0.86, color: 0x86a773 },
-            { y: 0.82, r: 1.18, color: 0x6f93a5 },
-            { y: 1.45, r: 0.94, color: 0x7298ac }
+            { y: -1.22, r: 0.88, thicknessMul: 0.9, opacityMul: 0.8, glowMul: 0.9, color: 0xb47947 },
+            { y: -0.46, r: 1.38, thicknessMul: 1.22, opacityMul: 1.1, glowMul: 1.08, color: 0xc9964f },
+            { y: 0.22, r: 1.04, thicknessMul: 0.96, opacityMul: 0.76, glowMul: 0.76, color: 0x6f9472 },
+            { y: 0.98, r: 0.9, thicknessMul: 0.72, opacityMul: 0.52, glowMul: 0.55, color: 0x65859a },
+            { y: 1.64, r: 0.73, thicknessMul: 0.58, opacityMul: 0.36, glowMul: 0.45, color: 0x87a0b4 }
         ];
 
         ringDefinitions.forEach((def) => {
@@ -128,19 +139,58 @@ class RingSystem {
         const group = new THREE.Group();
         group.position.y = def.y;
 
-        const thickness = VISUAL_SCENE_CONFIG.ringThickness;
+        const thickness = VISUAL_SCENE_CONFIG.ringThickness * def.thicknessMul;
         const innerRadius = Math.max(0.01, def.r - thickness * 0.5);
         const outerRadius = def.r + thickness * 0.5;
+        const baseColor = new THREE.Color(def.color);
+        const rimColor = baseColor.clone().lerp(new THREE.Color(0xf3d7a8), 0.28);
+        const haloColor = baseColor.clone().multiplyScalar(0.82);
 
+        const ringGeometry = new THREE.RingGeometry(innerRadius, outerRadius, 220, 1);
         const ringMat = new THREE.ShaderMaterial({
             transparent: true,
             depthWrite: false,
             side: THREE.DoubleSide,
             blending: THREE.AdditiveBlending,
             uniforms: {
-                uColor: { value: new THREE.Color(def.color) },
-                uOpacity: { value: VISUAL_SCENE_CONFIG.ringOpacity },
-                uGlow: { value: VISUAL_SCENE_CONFIG.ringGlow }
+                uColor: { value: baseColor },
+                uRimColor: { value: rimColor },
+                uOpacity: { value: VISUAL_SCENE_CONFIG.ringOpacity * def.opacityMul },
+                uGlow: { value: VISUAL_SCENE_CONFIG.ringGlow * def.glowMul }
+            },
+            vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+            fragmentShader: `
+                varying vec2 vUv;
+                uniform vec3 uColor;
+                uniform vec3 uRimColor;
+                uniform float uOpacity;
+                uniform float uGlow;
+                void main(){
+                    float rad = 1.0 - vUv.y;
+                    float body = exp(-pow((rad - 0.42) * 2.3, 2.0));
+                    float innerRim = exp(-pow(rad * 9.4, 2.0));
+                    float outerFade = 1.0 - smoothstep(0.34, 1.0, rad);
+                    float alpha = (body * 0.8 + innerRim * uGlow + outerFade * 0.35) * uOpacity;
+                    vec3 col = mix(uColor * 0.82, uRimColor, innerRim * 0.9 + body * 0.35);
+                    gl_FragColor = vec4(col, alpha);
+                }
+            `
+        });
+
+        const ring = new THREE.Mesh(ringGeometry, ringMat);
+        ring.rotation.x = -Math.PI / 2;
+        ring.scale.set(1.0, 0.7, 1.0);
+        group.add(ring);
+
+        const haloMat = new THREE.ShaderMaterial({
+            transparent: true,
+            depthWrite: false,
+            side: THREE.DoubleSide,
+            blending: THREE.AdditiveBlending,
+            uniforms: {
+                uColor: { value: haloColor },
+                uOpacity: { value: VISUAL_SCENE_CONFIG.ringOpacity * 0.28 * def.opacityMul },
+                uGlow: { value: VISUAL_SCENE_CONFIG.ringGlow * 0.7 * def.glowMul }
             },
             vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
             fragmentShader: `
@@ -149,19 +199,21 @@ class RingSystem {
                 uniform float uOpacity;
                 uniform float uGlow;
                 void main(){
-                    float ringBody = exp(-pow((vUv.y - 0.5) * 2.9, 2.0));
-                    float innerEdge = smoothstep(0.2, 0.0, vUv.y);
-                    float outerSoft = 1.0 - smoothstep(0.5, 1.0, vUv.y);
-                    float alpha = ringBody * 0.72 + innerEdge * uGlow + outerSoft * 0.18;
-                    gl_FragColor = vec4(uColor, alpha * uOpacity);
+                    float rad = 1.0 - vUv.y;
+                    float halo = exp(-pow((rad - 0.66) * 1.75, 2.0));
+                    float fringe = exp(-pow((rad - 0.87) * 3.5, 2.0));
+                    float alpha = (halo * 0.75 + fringe * uGlow * 0.65) * uOpacity;
+                    gl_FragColor = vec4(uColor, alpha);
                 }
             `
         });
-
-        const ring = new THREE.Mesh(new THREE.RingGeometry(innerRadius, outerRadius, 160), ringMat);
-        ring.rotation.x = -Math.PI / 2;
-        ring.scale.set(1.0, 0.74, 1.0);
-        group.add(ring);
+        const halo = new THREE.Mesh(
+            new THREE.RingGeometry(innerRadius, outerRadius + thickness * 0.68, 220, 1),
+            haloMat
+        );
+        halo.rotation.x = -Math.PI / 2;
+        halo.scale.set(1.0, 0.72, 1.0);
+        group.add(halo);
 
         return group;
     }
@@ -202,7 +254,9 @@ class AxisSystem {
         });
 
         const axisMesh = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.05, 3.7, 32, 1, true), axisMat);
-        axisMesh.position.y = 0.2;
+        axisMesh.geometry.dispose();
+        axisMesh.geometry = new THREE.CylinderGeometry(0.023, 0.02, VISUAL_SCENE_CONFIG.axisHeight, 28, 1, true);
+        axisMesh.position.y = 0.1;
         this.group.add(axisMesh);
     }
 
@@ -217,7 +271,7 @@ class CameraSystem {
     }
 
     apply() {
-        this.camera.position.set(0, 1.2, VISUAL_SCENE_CONFIG.cameraDistance);
+        this.camera.position.set(0, 1.48, VISUAL_SCENE_CONFIG.cameraDistance);
         this.camera.lookAt(this.target);
     }
 
