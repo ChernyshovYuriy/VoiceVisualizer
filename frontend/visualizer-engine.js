@@ -55,42 +55,77 @@ class PitchBandSystem {
         this.group = new THREE.Group();
         scene.add(this.group);
 
-        const yMin = -1.7;
+        const yMin = -1.8;
         const yMax = 2.05;
         const gap = (yMax - yMin) / (VISUAL_SCENE_CONFIG.pitchBandCount - 1);
-        const bandGeo = new THREE.PlaneGeometry(9.2, 1.05, 1, 1);
+        const centers = [];
+        const colors = [];
 
         for (let i = 0; i < VISUAL_SCENE_CONFIG.pitchBandCount; i++) {
             const t = i / (VISUAL_SCENE_CONFIG.pitchBandCount - 1);
-            const color = this.colorForBand(t);
-            const mat = new THREE.ShaderMaterial({
-                transparent: true,
-                depthWrite: false,
-                blending: THREE.AdditiveBlending,
-                uniforms: {
-                    uColor: { value: color },
-                    uOpacity: { value: VISUAL_SCENE_CONFIG.bandOpacity },
-                    uSoftness: { value: VISUAL_SCENE_CONFIG.bandSoftness }
-                },
-                vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
-                fragmentShader: `
-                    varying vec2 vUv;
-                    uniform vec3 uColor;
-                    uniform float uOpacity;
-                    uniform float uSoftness;
-                    void main(){
-                        float verticalSoft = exp(-pow((vUv.y - 0.5) * 2.35 / uSoftness, 2.0));
-                        float horizontalCore = exp(-pow((vUv.x - 0.5) * 1.7, 2.0));
-                        float horizontalFade = smoothstep(0.0, 0.16, vUv.x) * (1.0 - smoothstep(0.84, 1.0, vUv.x));
-                        float alpha = verticalSoft * (horizontalCore * 0.85 + horizontalFade * 0.4) * uOpacity;
-                        gl_FragColor = vec4(uColor, alpha);
-                    }
-                `
-            });
-            const band = new THREE.Mesh(bandGeo, mat);
-            band.position.set(0, yMin + i * gap, -1.55);
-            this.group.add(band);
+            const col = this.colorForBand(t);
+            centers.push(yMin + i * gap);
+            colors.push(new THREE.Vector3(col.r, col.g, col.b));
         }
+
+        const volumeMaterial = new THREE.ShaderMaterial({
+            transparent: true,
+            depthWrite: false,
+            depthTest: true,
+            blending: THREE.AdditiveBlending,
+            uniforms: {
+                uOpacity: { value: VISUAL_SCENE_CONFIG.bandOpacity * 0.55 },
+                uCenters: { value: centers },
+                uColors: { value: colors },
+                uCount: { value: VISUAL_SCENE_CONFIG.pitchBandCount },
+                uSoftness: { value: 0.62 }
+            },
+            vertexShader: `
+                varying vec3 vWorldPos;
+                void main() {
+                    vec4 world = modelMatrix * vec4(position, 1.0);
+                    vWorldPos = world.xyz;
+                    gl_Position = projectionMatrix * viewMatrix * world;
+                }
+            `,
+            fragmentShader: `
+                varying vec3 vWorldPos;
+                uniform float uOpacity;
+                uniform float uCenters[7];
+                uniform vec3 uColors[7];
+                uniform int uCount;
+                uniform float uSoftness;
+
+                void main() {
+                    vec3 sumColor = vec3(0.0);
+                    float alpha = 0.0;
+
+                    for (int i = 0; i < 7; i++) {
+                        if (i >= uCount) { break; }
+                        float dy = (vWorldPos.y - uCenters[i]) / uSoftness;
+                        float layer = exp(-dy * dy);
+                        sumColor += uColors[i] * layer;
+                        alpha += layer;
+                    }
+
+                    float depthFade = exp(-pow(vWorldPos.x * 0.11, 2.0));
+                    depthFade *= exp(-pow((vWorldPos.z + 4.8) * 0.2, 2.0));
+                    float edgeFade = exp(-pow(vWorldPos.x * 0.08, 2.0));
+                    alpha = alpha * uOpacity * depthFade * edgeFade;
+
+                    if (alpha < 0.003) {
+                        discard;
+                    }
+
+                    vec3 color = sumColor / max(alpha / max(uOpacity, 0.0001), 0.0001);
+                    gl_FragColor = vec4(color, min(alpha, 0.28));
+                }
+            `
+        });
+
+        const volume = new THREE.Mesh(new THREE.PlaneGeometry(16.0, 10.0, 1, 1), volumeMaterial);
+        volume.position.set(0, 0.1, -3.8);
+        this.group.add(volume);
     }
 
     colorForBand(t) {
@@ -122,11 +157,11 @@ class RingSystem {
         scene.add(this.group);
 
         const ringDefinitions = [
-            { y: -1.22, r: 0.88, thicknessMul: 0.9, opacityMul: 0.8, glowMul: 0.9, color: 0xb47947 },
-            { y: -0.46, r: 1.38, thicknessMul: 1.22, opacityMul: 1.1, glowMul: 1.08, color: 0xc9964f },
-            { y: 0.22, r: 1.04, thicknessMul: 0.96, opacityMul: 0.76, glowMul: 0.76, color: 0x6f9472 },
-            { y: 0.98, r: 0.9, thicknessMul: 0.72, opacityMul: 0.52, glowMul: 0.55, color: 0x65859a },
-            { y: 1.64, r: 0.73, thicknessMul: 0.58, opacityMul: 0.36, glowMul: 0.45, color: 0x87a0b4 }
+            { y: -1.2, z: 0.45, r: 1.38, thicknessMul: 1.25, opacityMul: 1.15, glowMul: 1.0, color: 0xbf8650 },
+            { y: -0.55, z: -0.2, r: 1.18, thicknessMul: 1.05, opacityMul: 0.95, glowMul: 0.85, color: 0xc99a58 },
+            { y: 0.14, z: -0.9, r: 1.0, thicknessMul: 0.85, opacityMul: 0.7, glowMul: 0.66, color: 0x719072 },
+            { y: 0.92, z: -1.55, r: 0.86, thicknessMul: 0.66, opacityMul: 0.5, glowMul: 0.52, color: 0x648497 },
+            { y: 1.62, z: -2.15, r: 0.72, thicknessMul: 0.52, opacityMul: 0.37, glowMul: 0.42, color: 0x8298ac }
         ];
 
         ringDefinitions.forEach((def) => {
@@ -137,17 +172,20 @@ class RingSystem {
 
     createRing(def) {
         const group = new THREE.Group();
-        group.position.y = def.y;
+        group.position.set(0, def.y, def.z);
 
         const thickness = VISUAL_SCENE_CONFIG.ringThickness * def.thicknessMul;
-        const innerRadius = Math.max(0.01, def.r - thickness * 0.5);
-        const outerRadius = def.r + thickness * 0.5;
+        const depthT = THREE.MathUtils.clamp((def.z + 2.3) / 2.8, 0.0, 1.0);
+        const depthSaturation = THREE.MathUtils.lerp(0.72, 1.0, depthT);
+        const nearBoost = THREE.MathUtils.lerp(0.78, 1.0, depthT);
         const baseColor = new THREE.Color(def.color);
-        const rimColor = baseColor.clone().lerp(new THREE.Color(0xf3d7a8), 0.28);
-        const haloColor = baseColor.clone().multiplyScalar(0.82);
+        baseColor.lerp(new THREE.Color(0x64748a), 1.0 - depthSaturation);
+        const rimColor = baseColor.clone().lerp(new THREE.Color(0xf2d7aa), 0.26);
+        const haloColor = baseColor.clone().multiplyScalar(0.78);
 
-        const ringGeometry = new THREE.RingGeometry(innerRadius, outerRadius, 220, 1);
-        const ringMat = new THREE.ShaderMaterial({
+        const ringGeometry = new THREE.CircleGeometry(def.r + thickness * 1.65, 280);
+
+        const makeBandMaterial = (profile) => new THREE.ShaderMaterial({
             transparent: true,
             depthWrite: false,
             side: THREE.DoubleSide,
@@ -155,65 +193,66 @@ class RingSystem {
             uniforms: {
                 uColor: { value: baseColor },
                 uRimColor: { value: rimColor },
-                uOpacity: { value: VISUAL_SCENE_CONFIG.ringOpacity * def.opacityMul },
-                uGlow: { value: VISUAL_SCENE_CONFIG.ringGlow * def.glowMul }
+                uInner: { value: profile.inner },
+                uOuter: { value: profile.outer },
+                uSoftInner: { value: profile.softInner },
+                uSoftOuter: { value: profile.softOuter },
+                uRimWeight: { value: profile.rimWeight },
+                uBodyWeight: { value: profile.bodyWeight },
+                uOpacity: { value: VISUAL_SCENE_CONFIG.ringOpacity * def.opacityMul * profile.opacity * nearBoost },
+                uGlow: { value: VISUAL_SCENE_CONFIG.ringGlow * def.glowMul * profile.glow }
             },
             vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
             fragmentShader: `
                 varying vec2 vUv;
                 uniform vec3 uColor;
                 uniform vec3 uRimColor;
+                uniform float uInner;
+                uniform float uOuter;
+                uniform float uSoftInner;
+                uniform float uSoftOuter;
+                uniform float uRimWeight;
+                uniform float uBodyWeight;
                 uniform float uOpacity;
                 uniform float uGlow;
                 void main(){
-                    float rad = 1.0 - vUv.y;
-                    float body = exp(-pow((rad - 0.42) * 2.3, 2.0));
-                    float innerRim = exp(-pow(rad * 9.4, 2.0));
-                    float outerFade = 1.0 - smoothstep(0.34, 1.0, rad);
-                    float alpha = (body * 0.8 + innerRim * uGlow + outerFade * 0.35) * uOpacity;
-                    vec3 col = mix(uColor * 0.82, uRimColor, innerRim * 0.9 + body * 0.35);
+                    vec2 p = vUv * 2.0 - 1.0;
+                    float radial = length(p);
+                    float inside = smoothstep(uInner - uSoftInner, uInner + uSoftInner, radial);
+                    float outside = 1.0 - smoothstep(uOuter - uSoftOuter, uOuter + uSoftOuter, radial);
+                    float ringMask = inside * outside;
+
+                    if (ringMask < 0.001) {
+                        discard;
+                    }
+
+                    float ringT = clamp((radial - uInner) / max(uOuter - uInner, 0.001), 0.0, 1.0);
+                    float innerRim = exp(-pow(ringT * 8.0, 2.0));
+                    float body = exp(-pow((ringT - 0.48) * 2.2, 2.0));
+                    float outerGlow = exp(-pow((ringT - 0.92) * 3.0, 2.0));
+                    float alpha = ringMask * (innerRim * uRimWeight * uGlow + body * uBodyWeight + outerGlow * 0.45 * uGlow) * uOpacity;
+                    vec3 col = mix(uColor * 0.8, uRimColor, innerRim * 0.9 + body * 0.32);
                     gl_FragColor = vec4(col, alpha);
                 }
             `
         });
 
-        const ring = new THREE.Mesh(ringGeometry, ringMat);
-        ring.rotation.x = -Math.PI / 2;
-        ring.scale.set(1.0, 0.7, 1.0);
-        group.add(ring);
+        const layers = [
+            { inner: def.r - thickness * 0.54, outer: def.r + thickness * 0.46, softInner: 0.012, softOuter: 0.035, rimWeight: 1.15, bodyWeight: 0.72, opacity: 1.0, glow: 1.0, yOff: 0.0, xScale: 1.0, zScale: 0.68, colorShift: 0.0 },
+            { inner: def.r - thickness * 0.35, outer: def.r + thickness * 0.26, softInner: 0.01, softOuter: 0.03, rimWeight: 0.78, bodyWeight: 0.66, opacity: 0.52, glow: 0.78, yOff: 0.018, xScale: 0.98, zScale: 0.67, colorShift: 0.06 },
+            { inner: def.r - thickness * 0.6, outer: def.r + thickness * 0.95, softInner: 0.05, softOuter: 0.08, rimWeight: 0.34, bodyWeight: 0.56, opacity: 0.3, glow: 0.65, yOff: -0.024, xScale: 1.03, zScale: 0.7, colorShift: -0.08 }
+        ];
 
-        const haloMat = new THREE.ShaderMaterial({
-            transparent: true,
-            depthWrite: false,
-            side: THREE.DoubleSide,
-            blending: THREE.AdditiveBlending,
-            uniforms: {
-                uColor: { value: haloColor },
-                uOpacity: { value: VISUAL_SCENE_CONFIG.ringOpacity * 0.28 * def.opacityMul },
-                uGlow: { value: VISUAL_SCENE_CONFIG.ringGlow * 0.7 * def.glowMul }
-            },
-            vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
-            fragmentShader: `
-                varying vec2 vUv;
-                uniform vec3 uColor;
-                uniform float uOpacity;
-                uniform float uGlow;
-                void main(){
-                    float rad = 1.0 - vUv.y;
-                    float halo = exp(-pow((rad - 0.66) * 1.75, 2.0));
-                    float fringe = exp(-pow((rad - 0.87) * 3.5, 2.0));
-                    float alpha = (halo * 0.75 + fringe * uGlow * 0.65) * uOpacity;
-                    gl_FragColor = vec4(uColor, alpha);
-                }
-            `
+        layers.forEach((layer) => {
+            const mat = makeBandMaterial(layer);
+            mat.uniforms.uColor.value = haloColor.clone().lerp(baseColor, 0.5 + layer.colorShift);
+            mat.uniforms.uRimColor.value = rimColor.clone().lerp(baseColor, 0.25);
+            const mesh = new THREE.Mesh(ringGeometry, mat);
+            mesh.rotation.x = -Math.PI / 2;
+            mesh.position.y = layer.yOff;
+            mesh.scale.set(layer.xScale, 1.0, layer.zScale);
+            group.add(mesh);
         });
-        const halo = new THREE.Mesh(
-            new THREE.RingGeometry(innerRadius, outerRadius + thickness * 0.68, 220, 1),
-            haloMat
-        );
-        halo.rotation.x = -Math.PI / 2;
-        halo.scale.set(1.0, 0.72, 1.0);
-        group.add(halo);
 
         return group;
     }
@@ -234,7 +273,7 @@ class AxisSystem {
             uniforms: {
                 uCore: { value: new THREE.Color(0xd7c19c) },
                 uHalo: { value: new THREE.Color(0x6488a0) },
-                uOpacity: { value: VISUAL_SCENE_CONFIG.axisOpacity }
+                uOpacity: { value: VISUAL_SCENE_CONFIG.axisOpacity * 0.38 }
             },
             vertexShader: `varying vec3 vPos; void main(){ vPos = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
             fragmentShader: `
@@ -244,19 +283,19 @@ class AxisSystem {
                 uniform float uOpacity;
                 void main(){
                     float r = length(vPos.xz);
-                    float core = exp(-pow(r * 24.0, 2.0));
-                    float halo = exp(-pow(r * 8.0, 2.0));
-                    float alpha = (core * 0.8 + halo * 0.4) * uOpacity;
+                    float core = exp(-pow(r * 34.0, 2.0));
+                    float halo = exp(-pow(r * 11.0, 2.0));
+                    float alpha = (core * 0.55 + halo * 0.2) * uOpacity;
                     vec3 col = mix(uHalo, uCore, core);
                     gl_FragColor = vec4(col, alpha);
                 }
             `
         });
 
-        const axisMesh = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.05, 3.7, 32, 1, true), axisMat);
+        const axisMesh = new THREE.Mesh(new THREE.CylinderGeometry(0.012, 0.01, 2.1, 22, 1, true), axisMat);
         axisMesh.geometry.dispose();
-        axisMesh.geometry = new THREE.CylinderGeometry(0.023, 0.02, VISUAL_SCENE_CONFIG.axisHeight, 28, 1, true);
-        axisMesh.position.y = 0.1;
+        axisMesh.geometry = new THREE.CylinderGeometry(0.011, 0.009, VISUAL_SCENE_CONFIG.axisHeight * 0.72, 20, 1, true);
+        axisMesh.position.y = 0.05;
         this.group.add(axisMesh);
     }
 
