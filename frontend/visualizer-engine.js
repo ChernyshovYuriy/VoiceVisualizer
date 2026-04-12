@@ -1,7 +1,15 @@
 // Static ring-based baseline scene for Stage 1.
 // Relies on globals: THREE.
 
-const DEBUG_VIEW = false;
+const DEBUG_VIEW = (() => {
+    try {
+        const params = new URLSearchParams(window.location.search);
+        const debugFlag = params.get('debug3d') ?? params.get('debug');
+        return debugFlag === '1' || debugFlag === 'true' || debugFlag === 'on';
+    } catch (_err) {
+        return false;
+    }
+})();
 
 const VISUAL_SCENE_CONFIG = {
     DEBUG_VIEW,
@@ -33,7 +41,13 @@ const VISUAL_SCENE_CONFIG = {
     liveRingMaxRadius: 2.2,
     liveRingMinSigma: 0.018,
     liveRingMaxSigma: 0.09,
-    liveRingCarrierSafetyMargin: 0.16
+    liveRingCarrierSafetyMargin: 0.16,
+    ringYSmoothingSpeed: 9.0,
+    ringRadiusSmoothingSpeed: 10.0,
+    ringVisibilityAttackSpeed: 11.5,
+    ringVisibilityReleaseSpeed: 4.2,
+    ringStateSmoothingSpeed: 8.0,
+    ringDeactivateHoldSeconds: 0.2
 };
 
 class BackgroundSystem {
@@ -197,6 +211,58 @@ class PitchBandSystem {
     update() {}
 }
 
+class StageBaseSystem {
+    constructor(scene) {
+        this.group = new THREE.Group();
+        scene.add(this.group);
+
+        const baseMaterial = new THREE.ShaderMaterial({
+            transparent: true,
+            depthWrite: false,
+            side: THREE.DoubleSide,
+            uniforms: {
+                uBaseColor: { value: new THREE.Color(0x121a25) },
+                uRimColor: { value: new THREE.Color(0x263648) },
+                uInnerFade: { value: 0.42 },
+                uOuterFade: { value: 1.0 },
+                uOpacity: { value: 0.42 }
+            },
+            vertexShader: `
+                varying vec2 vUv;
+                void main() {
+                    vUv = uv * 2.0 - 1.0;
+                    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+                }
+            `,
+            fragmentShader: `
+                varying vec2 vUv;
+                uniform vec3 uBaseColor;
+                uniform vec3 uRimColor;
+                uniform float uInnerFade;
+                uniform float uOuterFade;
+                uniform float uOpacity;
+                void main() {
+                    float r = length(vUv);
+                    float body = 1.0 - smoothstep(uInnerFade, uOuterFade, r);
+                    float rim = smoothstep(0.62, 0.95, r) * (1.0 - smoothstep(0.95, 1.05, r));
+                    float alpha = body * uOpacity + rim * 0.14;
+                    if (alpha < 0.01) discard;
+                    vec3 color = mix(uBaseColor, uRimColor, rim * 0.75);
+                    gl_FragColor = vec4(color, alpha);
+                }
+            `
+        });
+
+        const baseMesh = new THREE.Mesh(new THREE.CircleGeometry(4.3, 84), baseMaterial);
+        baseMesh.rotation.x = -Math.PI / 2;
+        baseMesh.scale.set(1.36, 1.0, 0.93);
+        baseMesh.position.set(0, -1.88, -0.88);
+        this.group.add(baseMesh);
+    }
+
+    update() {}
+}
+
 class LiveRingSystem {
     constructor(scene) {
         this.group = new THREE.Group();
@@ -219,6 +285,17 @@ class LiveRingSystem {
             radiusEmphasis: 0,
             color: new THREE.Color(0xffa338)
         };
+        this.targetState = {
+            y: -0.5,
+            radius: 1.0,
+            visibility: 0,
+            coreIntensity: 0,
+            haloIntensity: 0,
+            thicknessEmphasis: 0,
+            radiusEmphasis: 0,
+            color: new THREE.Color(0xffa338)
+        };
+        this.lastActiveTime = -Infinity;
         const baseDefinition = { y: -0.5, z: -0.72, r: 1.05, sigma: 0.032, coreOpacity: 0.92, haloOpacity: 0.46, color: 0xffa338 };
         const motion = {
             phase: 0.95,
@@ -485,26 +562,54 @@ class LiveRingSystem {
         this.liveRingCarrierExtent = nextExtent;
     }
 
-    setLiveState(liveState = null) {
+    smoothToward(current, target, speed, dt) {
+        const alpha = 1 - Math.exp(-Math.max(0.001, speed) * Math.max(0, dt));
+        return MathUtils.lerp(current, target, alpha);
+    }
+
+    setLiveState(liveState = null, dt = 1 / 60, elapsed = 0) {
         const state = liveState || {};
-        this.ringState.y = MathUtils.lerp(this.ringState.y, state.y ?? this.ringState.y, 0.18);
-        this.ringState.radius = MathUtils.lerp(this.ringState.radius, state.radius ?? this.ringState.radius, 0.2);
-        this.ringState.visibility = MathUtils.lerp(this.ringState.visibility, state.visibility ?? 0, 0.22);
-        this.ringState.coreIntensity = MathUtils.lerp(this.ringState.coreIntensity, state.coreIntensity ?? 0, 0.2);
-        this.ringState.haloIntensity = MathUtils.lerp(this.ringState.haloIntensity, state.haloIntensity ?? 0, 0.2);
-        this.ringState.thicknessEmphasis = MathUtils.lerp(this.ringState.thicknessEmphasis, state.thicknessEmphasis ?? 0, 0.18);
-        this.ringState.radiusEmphasis = MathUtils.lerp(this.ringState.radiusEmphasis, state.radiusEmphasis ?? 0, 0.2);
+        const active = Boolean(state.active);
+        if (active) {
+            this.lastActiveTime = elapsed;
+            this.targetState.y = state.y ?? this.targetState.y;
+            this.targetState.radius = state.radius ?? this.targetState.radius;
+            this.targetState.visibility = state.visibility ?? this.targetState.visibility;
+            this.targetState.coreIntensity = state.coreIntensity ?? this.targetState.coreIntensity;
+            this.targetState.haloIntensity = state.haloIntensity ?? this.targetState.haloIntensity;
+            this.targetState.thicknessEmphasis = state.thicknessEmphasis ?? this.targetState.thicknessEmphasis;
+            this.targetState.radiusEmphasis = state.radiusEmphasis ?? this.targetState.radiusEmphasis;
+        } else {
+            const inHold = (elapsed - this.lastActiveTime) <= VISUAL_SCENE_CONFIG.ringDeactivateHoldSeconds;
+            this.targetState.visibility = inHold ? Math.max(this.targetState.visibility * 0.94, 0.08) : 0;
+            this.targetState.coreIntensity = inHold ? this.targetState.coreIntensity * 0.92 : 0;
+            this.targetState.haloIntensity = inHold ? this.targetState.haloIntensity * 0.9 : 0;
+            this.targetState.thicknessEmphasis = inHold ? this.targetState.thicknessEmphasis * 0.9 : 0;
+            this.targetState.radiusEmphasis = inHold ? this.targetState.radiusEmphasis * 0.9 : 0;
+        }
+
+        this.ringState.y = this.smoothToward(this.ringState.y, this.targetState.y, VISUAL_SCENE_CONFIG.ringYSmoothingSpeed, dt);
+        this.ringState.radius = this.smoothToward(this.ringState.radius, this.targetState.radius, VISUAL_SCENE_CONFIG.ringRadiusSmoothingSpeed, dt);
+        const visibilitySpeed = this.targetState.visibility > this.ringState.visibility
+            ? VISUAL_SCENE_CONFIG.ringVisibilityAttackSpeed
+            : VISUAL_SCENE_CONFIG.ringVisibilityReleaseSpeed;
+        this.ringState.visibility = this.smoothToward(this.ringState.visibility, this.targetState.visibility, visibilitySpeed, dt);
+        this.ringState.coreIntensity = this.smoothToward(this.ringState.coreIntensity, this.targetState.coreIntensity, VISUAL_SCENE_CONFIG.ringStateSmoothingSpeed, dt);
+        this.ringState.haloIntensity = this.smoothToward(this.ringState.haloIntensity, this.targetState.haloIntensity, VISUAL_SCENE_CONFIG.ringStateSmoothingSpeed, dt);
+        this.ringState.thicknessEmphasis = this.smoothToward(this.ringState.thicknessEmphasis, this.targetState.thicknessEmphasis, VISUAL_SCENE_CONFIG.ringStateSmoothingSpeed, dt);
+        this.ringState.radiusEmphasis = this.smoothToward(this.ringState.radiusEmphasis, this.targetState.radiusEmphasis, VISUAL_SCENE_CONFIG.ringStateSmoothingSpeed, dt);
         if (state.color) {
             this.ringState.color.lerp(state.color, 0.18);
+            this.targetState.color.copy(state.color);
         }
     }
 
-    update(timeSeconds = 0, liveState = null) {
+    update(timeSeconds = 0, liveState = null, dt = 1 / 60) {
         for (const material of this.ringMaterials) {
             material.uniforms.uTime.value = timeSeconds;
         }
 
-        this.setLiveState(liveState);
+        this.setLiveState(liveState, dt, timeSeconds);
 
         const visible = MathUtils.clamp(this.ringState.visibility, 0, 1);
         this.liveRingGroup.visible = visible > 0.01;
@@ -567,7 +672,8 @@ class LiveRingSystem {
 
         const timbreTilt = (centroidNorm - 0.5) * 0.08;
         return {
-            y: -1.45 + pitchNorm * 3.05,
+            active: true,
+            y: -1.45 + (1 - pitchNorm) * 3.05,
             radius: MathUtils.clamp(0.72 + loudNorm * 1.18 + onset * 0.09, this.liveRingMinRadius, this.liveRingMaxRadius),
             visibility: MathUtils.clamp(confidenceGate * 0.92 + loudNorm * 0.08, 0, 1),
             coreIntensity: MathUtils.clamp(loudNorm * 0.82 + onset * 0.65, 0, 1.5),
@@ -667,6 +773,7 @@ class VisualizerEngine {
         this.systems = {
             background: new BackgroundSystem(this.scene),
             pitchBands: new PitchBandSystem(this.scene),
+            stageBase: new StageBaseSystem(this.scene),
             rings: new LiveRingSystem(this.scene),
             axis: new AxisSystem(this.scene),
             camera: new CameraSystem(this.camera)
@@ -749,7 +856,7 @@ class VisualizerEngine {
         }
         Object.entries(this.systems).forEach(([key, system]) => {
             if (key === 'rings') {
-                system.update(elapsed, liveState);
+                system.update(elapsed, liveState, dt);
                 return;
             }
             system.update(elapsed);
