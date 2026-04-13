@@ -23,6 +23,8 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QSlider,
+    QStyle,
+    QStyleOptionSlider,
     QVBoxLayout,
     QWidget,
 )
@@ -254,6 +256,31 @@ class _PrepareWorker(QObject):
             self.failed.emit(str(exc))
 
 
+class SeekSlider(QSlider):
+    seek_clicked = Signal(int)
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.LeftButton:
+            opt = QStyleOptionSlider()
+            self.initStyleOption(opt)
+            handle = self.style().subControlRect(
+                QStyle.CC_Slider,
+                opt,
+                QStyle.SC_SliderHandle,
+                self,
+            )
+            if not handle.contains(event.position().toPoint()):
+                value = QStyle.sliderValueFromPosition(
+                    self.minimum(),
+                    self.maximum(),
+                    int(event.position().x()),
+                    max(1, self.width()),
+                )
+                self.setValue(value)
+                self.seek_clicked.emit(value)
+        super().mousePressEvent(event)
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -268,6 +295,8 @@ class MainWindow(QMainWindow):
         self._analyzer = Analyzer(self._buffer, self._bridge.frame_ready.emit)
         self._player = Player(on_chunk=self._analyzer.push_chunk)
         self._slider_dragging = False
+        self._drag_seek_seconds = 0.0
+        self._click_seek_handled = False
         self._prepared: PreparedMedia | None = None
         self._source_path: Path | None = None
         self._progress: QProgressDialog | None = None
@@ -403,11 +432,12 @@ class MainWindow(QMainWindow):
         self._lbl_cur.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self._lbl_cur.setFixedWidth(36)
 
-        self._slider = QSlider(Qt.Horizontal)
+        self._slider = SeekSlider(Qt.Horizontal)
         self._slider.setRange(0, 1000)
-        self._slider.sliderPressed.connect(lambda: setattr(self, "_slider_dragging", True))
-        self._slider.sliderReleased.connect(self._on_seek)
+        self._slider.sliderPressed.connect(self._on_slider_pressed)
+        self._slider.sliderReleased.connect(self._on_slider_released)
         self._slider.sliderMoved.connect(self._on_slider_moved)
+        self._slider.seek_clicked.connect(self._on_slider_clicked)
 
         self._lbl_dur = QLabel("0:00")
         self._lbl_dur.setStyleSheet(mono_style)
@@ -620,24 +650,56 @@ class MainWindow(QMainWindow):
             self._btn_play.setText("⏸  Pause")
 
     def _on_frame(self, info: FrameInfo) -> None:
+        if self._slider_dragging:
+            return
         mel_latest = self._buffer.snapshot()[0][-1]
         self._live.update_from_frame(info, mel_latest)
 
     def _on_slider_moved(self, v: int) -> None:
         dur = self._player.duration
         if dur > 0:
-            self._lbl_cur.setText(_fmt(v / 1000 * dur))
+            self._drag_seek_seconds = v / 1000 * dur
+            self._lbl_cur.setText(_fmt(self._drag_seek_seconds))
+            self._slider.setToolTip(_fmt(self._drag_seek_seconds))
 
-    def _on_seek(self) -> None:
+    def _on_slider_pressed(self) -> None:
+        self._slider_dragging = True
+
+    def _on_slider_released(self) -> None:
         self._slider_dragging = False
+        if self._click_seek_handled:
+            self._click_seek_handled = False
+            return
+        self._commit_seek(self._drag_seek_seconds)
+
+    def _on_slider_clicked(self, v: int) -> None:
+        dur = self._player.duration
+        if dur <= 0:
+            return
+        self._drag_seek_seconds = v / 1000 * dur
+        self._lbl_cur.setText(_fmt(self._drag_seek_seconds))
+        self._click_seek_handled = True
+        self._commit_seek(self._drag_seek_seconds)
+
+    def _commit_seek(self, seconds: float) -> None:
         dur = self._player.duration
         if dur > 0:
-            self._player.seek(self._slider.value() / 1000 * dur)
+            target = max(0.0, min(seconds, dur))
+            self._buffer.reset()
+            self._live.reset()
+            self._analyzer.reset_state()
+            self._player.seek(target)
+            self._lbl_cur.setText(_fmt(target))
 
     def _tick_cb(self) -> None:
         dur = self._player.duration
         cur = self._player.current_time
-        if dur > 0 and not self._slider_dragging:
+        if dur <= 0:
+            return
+        if self._slider_dragging:
+            self._lbl_cur.setText(_fmt(self._drag_seek_seconds))
+            return
+        if dur > 0:
             self._slider.blockSignals(True)
             self._slider.setValue(int(cur / dur * 1000))
             self._slider.blockSignals(False)

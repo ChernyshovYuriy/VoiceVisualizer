@@ -73,6 +73,15 @@ class Analyzer:
         except queue.Full:
             pass  # drop frame rather than stall the audio callback
 
+    def reset_state(self) -> None:
+        """Clear temporal DSP state and drop queued pre-seek chunks."""
+        with self._queue.mutex:
+            self._queue.queue.clear()
+            self._queue.unfinished_tasks = 0
+        self._ctx.fill(0.0)
+        self._prev_mel.fill(0.0)
+        self._prev_pitch = float("nan")
+
     def _loop(self) -> None:
         while True:
             try:
