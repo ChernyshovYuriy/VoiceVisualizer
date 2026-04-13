@@ -42,18 +42,22 @@ const VISUAL_SCENE_CONFIG = {
     liveRingMinSigma: 0.018,
     liveRingMaxSigma: 0.09,
     liveRingCarrierSafetyMargin: 0.16,
-    ringYSmoothingSpeed: 9.0,
+    ringAttackYSpeed: 18.0,
+    ringTrackingYSpeed: 15.0,
+    ringReleaseFallSpeed: 17.0,
     ringRadiusSmoothingSpeed: 10.0,
     ringVisibilityAttackSpeed: 11.5,
-    ringVisibilityReleaseSpeed: 4.2,
+    ringVisibilityReleaseSpeed: 8.0,
     ringStateSmoothingSpeed: 8.0,
-    ringEntryDurationSeconds: 0.28,
-    ringExitDurationSeconds: 0.4,
     ringEntrySpawnY: -1.88,
     ringReactivationOnThreshold: 0.26,
     ringReactivationOffThreshold: 0.13,
-    ringReactivationMinPitchConf: 0.14,
-    ringReactivationMinLoudness: 0.03
+    ringReactivationMinPitchConf: 0.2,
+    ringReactivationMinLoudness: 0.04,
+    ringVoicedMinPitchHz: 65,
+    ringVoicedMaxPitchHz: 1300,
+    ringVoicedMinStability: 0.18,
+    ringAttackSettleDistance: 0.045
 };
 
 class BackgroundSystem {
@@ -302,26 +306,9 @@ class LiveRingSystem {
             color: new THREE.Color(0xffa338)
         };
         this.lastActiveTime = -Infinity;
-        this.wasLiveActive = false;
-        this.ringLifecycleState = 'hidden';
+        this.ringLifecycleState = 'IDLE/FALLEN';
         this.targetPitchY = -0.5;
         this.displayY = VISUAL_SCENE_CONFIG.ringEntrySpawnY;
-        this.entryState = {
-            active: false,
-            progress: 1,
-            startY: VISUAL_SCENE_CONFIG.ringEntrySpawnY
-        };
-        this.exitState = {
-            active: false,
-            progress: 1,
-            startY: VISUAL_SCENE_CONFIG.ringEntrySpawnY,
-            startRadius: 1.0,
-            startVisibility: 0,
-            startCoreIntensity: 0,
-            startHaloIntensity: 0,
-            startThicknessEmphasis: 0,
-            startRadiusEmphasis: 0
-        };
         const baseDefinition = { y: -0.5, z: -0.72, r: 1.05, sigma: 0.032, coreOpacity: 0.92, haloOpacity: 0.46, color: 0xffa338 };
         const motion = {
             phase: 0.95,
@@ -593,53 +580,43 @@ class LiveRingSystem {
         return MathUtils.lerp(current, target, alpha);
     }
 
+    transitionToAttack(liveInput) {
+        this.ringLifecycleState = 'ATTACK_FROM_BOTTOM';
+        this.displayY = VISUAL_SCENE_CONFIG.ringEntrySpawnY;
+        this.targetPitchY = liveInput.y;
+        this.ringState.y = this.displayY;
+        this.ringState.visibility = 0;
+        this.targetState.visibility = Math.max(0.82, liveInput.visibility ?? 0.9);
+    }
+
+    transitionToRelease() {
+        if (this.ringLifecycleState === 'IDLE/FALLEN' || this.ringLifecycleState === 'RELEASE_FALL') {
+            return;
+        }
+        this.ringLifecycleState = 'RELEASE_FALL';
+    }
+
     setLiveState(liveState = null, dt = 1 / 60, elapsed = 0) {
         const state = liveState || {};
-        const hasLiveSignal = Boolean(state.active);
-        const canFollowPitch = hasLiveSignal;
+        const voiced = Boolean(state.voiced);
 
-        if (canFollowPitch) {
+        if (voiced) {
             this.targetPitchY = state.y ?? this.targetPitchY;
-            if (!this.wasLiveActive || this.ringLifecycleState === 'hidden' || this.ringLifecycleState === 'exiting') {
-                this.entryState.active = true;
-                this.entryState.progress = 0;
-                this.entryState.startY = VISUAL_SCENE_CONFIG.ringEntrySpawnY;
-                this.displayY = this.entryState.startY;
-                this.ringLifecycleState = 'entering';
-                this.exitState.active = false;
-                this.exitState.progress = 1;
-                this.exitState.startY = VISUAL_SCENE_CONFIG.ringEntrySpawnY;
-                this.exitState.startRadius = this.ringState.radius;
-                this.exitState.startVisibility = this.ringState.visibility;
-                this.exitState.startCoreIntensity = this.ringState.coreIntensity;
-                this.exitState.startHaloIntensity = this.ringState.haloIntensity;
-                this.exitState.startThicknessEmphasis = this.ringState.thicknessEmphasis;
-                this.exitState.startRadiusEmphasis = this.ringState.radiusEmphasis;
-            } else if (this.ringLifecycleState !== 'entering') {
-                this.ringLifecycleState = 'active';
-            }
-            this.lastActiveTime = elapsed;
             this.targetState.radius = state.radius ?? this.targetState.radius;
             this.targetState.visibility = state.visibility ?? this.targetState.visibility;
             this.targetState.coreIntensity = state.coreIntensity ?? this.targetState.coreIntensity;
             this.targetState.haloIntensity = state.haloIntensity ?? this.targetState.haloIntensity;
             this.targetState.thicknessEmphasis = state.thicknessEmphasis ?? this.targetState.thicknessEmphasis;
             this.targetState.radiusEmphasis = state.radiusEmphasis ?? this.targetState.radiusEmphasis;
-        } else {
-            if (this.ringLifecycleState === 'active' || this.ringLifecycleState === 'entering') {
-                this.ringLifecycleState = 'exiting';
-                this.entryState.active = false;
-                this.entryState.progress = 1;
-                this.exitState.active = true;
-                this.exitState.progress = 0;
-                this.exitState.startY = Math.max(this.displayY, VISUAL_SCENE_CONFIG.ringEntrySpawnY);
-                this.exitState.startRadius = this.ringState.radius;
-                this.exitState.startVisibility = this.ringState.visibility;
-                this.exitState.startCoreIntensity = this.ringState.coreIntensity;
-                this.exitState.startHaloIntensity = this.ringState.haloIntensity;
-                this.exitState.startThicknessEmphasis = this.ringState.thicknessEmphasis;
-                this.exitState.startRadiusEmphasis = this.ringState.radiusEmphasis;
+            this.lastActiveTime = elapsed;
+
+            if (this.ringLifecycleState === 'IDLE/FALLEN' || this.ringLifecycleState === 'RELEASE_FALL') {
+                this.transitionToAttack(state);
+            } else if (this.ringLifecycleState !== 'ATTACK_FROM_BOTTOM') {
+                this.ringLifecycleState = 'TRACKING_LIVE_NOTE';
             }
+        } else {
+            this.transitionToRelease();
             this.targetState.visibility = 0;
             this.targetState.coreIntensity = 0;
             this.targetState.haloIntensity = 0;
@@ -647,69 +624,34 @@ class LiveRingSystem {
             this.targetState.radiusEmphasis = 0;
         }
 
-        if (this.ringLifecycleState !== 'exiting') {
-            this.ringState.radius = this.smoothToward(this.ringState.radius, this.targetState.radius, VISUAL_SCENE_CONFIG.ringRadiusSmoothingSpeed, dt);
-            const visibilitySpeed = this.targetState.visibility > this.ringState.visibility
-                ? VISUAL_SCENE_CONFIG.ringVisibilityAttackSpeed
-                : VISUAL_SCENE_CONFIG.ringVisibilityReleaseSpeed;
-            this.ringState.visibility = this.smoothToward(this.ringState.visibility, this.targetState.visibility, visibilitySpeed, dt);
-            this.ringState.coreIntensity = this.smoothToward(this.ringState.coreIntensity, this.targetState.coreIntensity, VISUAL_SCENE_CONFIG.ringStateSmoothingSpeed, dt);
-            this.ringState.haloIntensity = this.smoothToward(this.ringState.haloIntensity, this.targetState.haloIntensity, VISUAL_SCENE_CONFIG.ringStateSmoothingSpeed, dt);
-            this.ringState.thicknessEmphasis = this.smoothToward(this.ringState.thicknessEmphasis, this.targetState.thicknessEmphasis, VISUAL_SCENE_CONFIG.ringStateSmoothingSpeed, dt);
-            this.ringState.radiusEmphasis = this.smoothToward(this.ringState.radiusEmphasis, this.targetState.radiusEmphasis, VISUAL_SCENE_CONFIG.ringStateSmoothingSpeed, dt);
-        }
-        if (this.ringLifecycleState === 'entering' && this.entryState.active) {
-            const duration = Math.max(0.05, VISUAL_SCENE_CONFIG.ringEntryDurationSeconds);
-            this.entryState.progress = Math.min(1, this.entryState.progress + dt / duration);
-            const eased = 1 - Math.pow(1 - this.entryState.progress, 3);
-            this.displayY = MathUtils.lerp(this.entryState.startY, this.targetPitchY, eased);
-            if (this.entryState.progress >= 1) {
-                this.entryState.active = false;
-                this.ringLifecycleState = 'active';
+        const visibilitySpeed = this.targetState.visibility > this.ringState.visibility
+            ? VISUAL_SCENE_CONFIG.ringVisibilityAttackSpeed
+            : VISUAL_SCENE_CONFIG.ringVisibilityReleaseSpeed;
+        this.ringState.radius = this.smoothToward(this.ringState.radius, this.targetState.radius, VISUAL_SCENE_CONFIG.ringRadiusSmoothingSpeed, dt);
+        this.ringState.visibility = this.smoothToward(this.ringState.visibility, this.targetState.visibility, visibilitySpeed, dt);
+        this.ringState.coreIntensity = this.smoothToward(this.ringState.coreIntensity, this.targetState.coreIntensity, VISUAL_SCENE_CONFIG.ringStateSmoothingSpeed, dt);
+        this.ringState.haloIntensity = this.smoothToward(this.ringState.haloIntensity, this.targetState.haloIntensity, VISUAL_SCENE_CONFIG.ringStateSmoothingSpeed, dt);
+        this.ringState.thicknessEmphasis = this.smoothToward(this.ringState.thicknessEmphasis, this.targetState.thicknessEmphasis, VISUAL_SCENE_CONFIG.ringStateSmoothingSpeed, dt);
+        this.ringState.radiusEmphasis = this.smoothToward(this.ringState.radiusEmphasis, this.targetState.radiusEmphasis, VISUAL_SCENE_CONFIG.ringStateSmoothingSpeed, dt);
+
+        if (this.ringLifecycleState === 'ATTACK_FROM_BOTTOM') {
+            this.displayY = this.smoothToward(this.displayY, this.targetPitchY, VISUAL_SCENE_CONFIG.ringAttackYSpeed, dt);
+            if (Math.abs(this.displayY - this.targetPitchY) <= VISUAL_SCENE_CONFIG.ringAttackSettleDistance) {
+                this.ringLifecycleState = 'TRACKING_LIVE_NOTE';
             }
-        } else if (this.ringLifecycleState === 'active') {
-            this.displayY = this.smoothToward(this.displayY, this.targetPitchY, VISUAL_SCENE_CONFIG.ringYSmoothingSpeed, dt);
-        } else if (this.ringLifecycleState === 'exiting') {
-            const exitDuration = Math.max(0.08, VISUAL_SCENE_CONFIG.ringExitDurationSeconds);
-            this.exitState.progress = Math.min(1, this.exitState.progress + dt / exitDuration);
-            const eased = 1 - Math.pow(1 - this.exitState.progress, 2);
-            const releaseY = MathUtils.lerp(this.exitState.startY, VISUAL_SCENE_CONFIG.ringEntrySpawnY, eased);
-            this.displayY = Math.min(this.displayY, releaseY);
-            this.ringState.radius = MathUtils.lerp(this.exitState.startRadius, this.exitState.startRadius * 0.92, eased);
-            this.ringState.visibility = MathUtils.lerp(this.exitState.startVisibility, 0, eased);
-            this.ringState.coreIntensity = MathUtils.lerp(this.exitState.startCoreIntensity, 0, eased);
-            this.ringState.haloIntensity = MathUtils.lerp(this.exitState.startHaloIntensity, 0, eased);
-            this.ringState.thicknessEmphasis = MathUtils.lerp(this.exitState.startThicknessEmphasis, 0, eased);
-            this.ringState.radiusEmphasis = MathUtils.lerp(this.exitState.startRadiusEmphasis, 0, eased);
-            const closeToBase = Math.abs(this.displayY - VISUAL_SCENE_CONFIG.ringEntrySpawnY) < 0.02;
-            if (this.ringState.visibility < 0.01 && this.targetState.visibility <= 0.001 && closeToBase) {
-                this.ringLifecycleState = 'hidden';
+        } else if (this.ringLifecycleState === 'TRACKING_LIVE_NOTE') {
+            this.displayY = this.smoothToward(this.displayY, this.targetPitchY, VISUAL_SCENE_CONFIG.ringTrackingYSpeed, dt);
+        } else if (this.ringLifecycleState === 'RELEASE_FALL') {
+            this.displayY = this.smoothToward(this.displayY, VISUAL_SCENE_CONFIG.ringEntrySpawnY, VISUAL_SCENE_CONFIG.ringReleaseFallSpeed, dt);
+            const closeToBase = Math.abs(this.displayY - VISUAL_SCENE_CONFIG.ringEntrySpawnY) <= 0.02;
+            if (closeToBase && this.ringState.visibility < 0.01) {
+                this.ringLifecycleState = 'IDLE/FALLEN';
                 this.displayY = VISUAL_SCENE_CONFIG.ringEntrySpawnY;
-                this.exitState.active = false;
-                this.exitState.progress = 1;
-                this.exitState.startY = VISUAL_SCENE_CONFIG.ringEntrySpawnY;
-                this.exitState.startRadius = this.ringState.radius;
-                this.exitState.startVisibility = 0;
-                this.exitState.startCoreIntensity = 0;
-                this.exitState.startHaloIntensity = 0;
-                this.exitState.startThicknessEmphasis = 0;
-                this.exitState.startRadiusEmphasis = 0;
+                this.ringState.visibility = 0;
             }
-        } else if (!hasLiveSignal && this.ringState.visibility < 0.01 && this.targetState.visibility <= 0.001) {
-            this.entryState.progress = 1;
-            this.entryState.active = false;
-            this.entryState.startY = VISUAL_SCENE_CONFIG.ringEntrySpawnY;
-            this.exitState.active = false;
-            this.exitState.progress = 1;
-            this.exitState.startY = VISUAL_SCENE_CONFIG.ringEntrySpawnY;
-            this.exitState.startRadius = this.ringState.radius;
-            this.exitState.startVisibility = 0;
-            this.exitState.startCoreIntensity = 0;
-            this.exitState.startHaloIntensity = 0;
-            this.exitState.startThicknessEmphasis = 0;
-            this.exitState.startRadiusEmphasis = 0;
+        } else {
             this.displayY = VISUAL_SCENE_CONFIG.ringEntrySpawnY;
-            this.ringLifecycleState = 'hidden';
+            this.ringState.visibility = 0;
         }
 
         this.ringState.y = this.displayY;
@@ -717,7 +659,6 @@ class LiveRingSystem {
             this.ringState.color.lerp(state.color, 0.18);
             this.targetState.color.copy(state.color);
         }
-        this.wasLiveActive = canFollowPitch;
     }
 
     update(timeSeconds = 0, liveState = null, dt = 1 / 60) {
@@ -771,28 +712,44 @@ class LiveRingSystem {
 
     mapLiveRingState(audioState) {
         if (!audioState) {
-            return { visibility: 0 };
+            return { voiced: false, visibility: 0 };
         }
 
-        const pitchNorm = MathUtils.clamp(audioState.pitchNorm ?? 0, 0, 1);
-        const loudNorm = MathUtils.clamp(audioState.loudNorm ?? 0, 0, 1);
+        const pitchHz = Math.max(0, audioState.pitchHz ?? 0);
         const pitchConf = MathUtils.clamp(audioState.pitchConf ?? 0, 0, 1);
+        const loudNorm = MathUtils.clamp(audioState.loudNorm ?? 0, 0, 1);
+        const loudNormRaw = MathUtils.clamp(audioState.loudNormRaw ?? loudNorm, 0, 1);
+        const notePresent = Boolean(audioState.note && audioState.note !== '—');
+        const minPitch = VISUAL_SCENE_CONFIG.ringVoicedMinPitchHz;
+        const maxPitch = VISUAL_SCENE_CONFIG.ringVoicedMaxPitchHz;
+        const pitchInRange = pitchHz >= minPitch && pitchHz <= maxPitch;
+        const stability = MathUtils.clamp(audioState.stability ?? 0, 0, 1);
         const onset = MathUtils.clamp(Math.max(audioState.transientFlash ?? 0, audioState.onset ?? 0), 0, 1);
         const centroidNorm = MathUtils.clamp(audioState.centroidNorm ?? 0.5, 0, 1);
+
         const confidenceGate = Math.max(0, (pitchConf - VISUAL_SCENE_CONFIG.ringActivationPitchConfFloor) / (1 - VISUAL_SCENE_CONFIG.ringActivationPitchConfFloor));
-        const activateScore = confidenceGate * 0.8 + loudNorm * 0.2 + onset * 0.12;
+        const activateScore = confidenceGate * 0.74 + loudNormRaw * 0.22 + onset * 0.08;
         const minPitchConf = VISUAL_SCENE_CONFIG.ringReactivationMinPitchConf;
         const minLoudness = VISUAL_SCENE_CONFIG.ringReactivationMinLoudness;
         const onThreshold = VISUAL_SCENE_CONFIG.ringReactivationOnThreshold;
-        const hasVoice = activateScore >= onThreshold && pitchConf >= minPitchConf && loudNorm >= minLoudness;
+        const minStability = VISUAL_SCENE_CONFIG.ringVoicedMinStability;
+        const hasVoice = (
+            pitchInRange &&
+            notePresent &&
+            pitchConf >= minPitchConf &&
+            loudNormRaw >= minLoudness &&
+            stability >= minStability &&
+            activateScore >= onThreshold
+        );
 
-        if (!hasVoice) {
-            return { visibility: 0 };
+        if (!hasVoice || !Number.isFinite(pitchHz)) {
+            return { voiced: false, visibility: 0 };
         }
 
+        const pitchNorm = MathUtils.clamp((Math.log(MathUtils.clamp(pitchHz, 80, 1500)) - Math.log(80)) / (Math.log(1500) - Math.log(80)), 0, 1);
         const timbreTilt = (centroidNorm - 0.5) * 0.08;
         return {
-            active: true,
+            voiced: true,
             y: -1.45 + pitchNorm * 3.05,
             radius: MathUtils.clamp(0.72 + loudNorm * 1.18 + onset * 0.09, this.liveRingMinRadius, this.liveRingMaxRadius),
             visibility: MathUtils.clamp(confidenceGate * 0.92 + loudNorm * 0.08, 0, 1),
@@ -963,13 +920,26 @@ class VisualizerEngine {
             this.audio.updateTime(dt);
         }
         const sm = this.audio?.smoothed || null;
+        const raw = this.audio?.state || null;
+        const pitchHistory = Array.isArray(raw?.pitchHist) ? raw.pitchHist : [];
+        const pitchMean = pitchHistory.length > 0
+            ? pitchHistory.reduce((a, b) => a + b, 0) / pitchHistory.length
+            : 0;
+        const pitchVariance = pitchHistory.length > 2
+            ? pitchHistory.reduce((acc, p) => acc + Math.pow(p - pitchMean, 2), 0) / pitchHistory.length
+            : 0;
+        const stability = MathUtils.clamp(1 - Math.sqrt(Math.max(0, pitchVariance)) / 42, 0, 1);
+        const loudNormRaw = MathUtils.clamp(((raw?.loudness ?? -80) + 58) / 38, 0, 1);
         const liveState = this.systems.rings.mapLiveRingState({
-            pitchNorm: sm?.pitchNorm ?? 0,
+            pitchHz: raw?.pitch ?? 0,
+            note: raw?.note ?? '—',
             loudNorm: sm?.loudNorm ?? 0,
-            pitchConf: sm?.pitchConf ?? 0,
-            onset: sm?.onset ?? 0,
+            loudNormRaw,
+            pitchConf: raw?.pitchConf ?? sm?.pitchConf ?? 0,
+            onset: raw?.onset ?? sm?.onset ?? 0,
             transientFlash: this.audio?.transientFlash ?? 0,
-            centroidNorm: sm?.centroidNorm ?? 0.5
+            centroidNorm: sm?.centroidNorm ?? 0.5,
+            stability
         });
         if (this.orbitControls) {
             this.orbitControls.update();
