@@ -42,13 +42,21 @@ const VISUAL_SCENE_CONFIG = {
     liveRingMinSigma: 0.018,
     liveRingMaxSigma: 0.09,
     liveRingCarrierSafetyMargin: 0.16,
-    ringYSmoothingSpeed: 9.0,
+    ringYSmoothingSpeed: 16.0,
     ringRadiusSmoothingSpeed: 10.0,
-    ringVisibilityAttackSpeed: 11.5,
+    ringVisibilityAttackSpeed: 20.0,
     ringVisibilityReleaseSpeed: 4.2,
     ringStateSmoothingSpeed: 8.0,
-    ringEntryDurationSeconds: 0.28,
+    ringEntryDurationSeconds: 0.14,
     ringExitDurationSeconds: 0.4,
+
+    // --- Pitch filter (between raw detector and render target) ---
+    // 1 semitone ≈ 0.06 in Y-space ( = ln(2^(1/12)) / ln(1500/80) * 3.05 )
+    pitchSemitoneY: 0.06,
+    pitchFilterEmaSpeed: 18.0,
+    pitchOutlierSemitones: 4.0,
+    pitchOutlierConfirmFrames: 2,
+    pitchHysteresisSemitones: 0.4,
     ringEntrySpawnY: -1.88,
     ringReactivationOnThreshold: 0.26,
     ringReactivationOffThreshold: 0.13,
@@ -315,6 +323,15 @@ class LiveRingSystem {
         this.releaseStartThicknessEmphasis = 0;
         this.releaseStartRadiusEmphasis = 0;
         this.displayY = VISUAL_SCENE_CONFIG.ringEntrySpawnY;
+        // Pitch filter: sits between raw detector output and render target.
+        // Provides outlier rejection, hysteresis, and short-EMA smoothing
+        // in pitch-space so the Y target doesn't jump frame-to-frame.
+        this.pitchFilter = {
+            filteredY: 0,
+            seeded: false,
+            outlierFrames: 0,
+            pendingOutlierY: 0,
+        };
         const baseDefinition = { y: -0.5, z: -0.72, r: 1.05, sigma: 0.032, coreOpacity: 0.92, haloOpacity: 0.46, color: 0xffa338 };
         const motion = {
             phase: 0.95,
@@ -586,6 +603,73 @@ class LiveRingSystem {
         return MathUtils.lerp(current, target, alpha);
     }
 
+    /**
+     * Pitch-domain filter: rawY → filteredY.
+     *
+     * Three layers, evaluated in order:
+     *   1. Outlier rejection  — single-frame spikes > N semitones from
+     *      the current filtered pitch are held for confirmation. If the
+     *      new pitch persists for `pitchOutlierConfirmFrames`, it's accepted
+     *      as a genuine jump and the filter re-seeds.
+     *   2. Hysteresis deadband — changes smaller than ~0.4 semitones are
+     *      suppressed, eliminating adjacent-note chatter.
+     *   3. Fast EMA — everything else is tracked with a short time-constant
+     *      (pitchFilterEmaSpeed) that glides smoothly between notes.
+     *
+     * On voice onset the filter is unseeded; the first voiced frame
+     * seeds it directly (zero onset lag).
+     */
+    _filterPitchY(rawY, dt) {
+        const f = this.pitchFilter;
+        const C = VISUAL_SCENE_CONFIG;
+        const semiY = C.pitchSemitoneY;
+
+        // --- First voiced frame: seed directly, zero lag ---
+        if (!f.seeded) {
+            f.filteredY = rawY;
+            f.seeded = true;
+            f.outlierFrames = 0;
+            return rawY;
+        }
+
+        const jumpSemitones = Math.abs(rawY - f.filteredY) / semiY;
+
+        // --- Layer 1: outlier rejection ---
+        if (jumpSemitones > C.pitchOutlierSemitones) {
+            // Is this the same outlier direction as last frame?
+            const consistentWithPending = f.outlierFrames > 0
+                && Math.abs(rawY - f.pendingOutlierY) / semiY < 2.0;
+
+            if (!consistentWithPending) {
+                // New or inconsistent spike — start fresh confirmation
+                f.pendingOutlierY = rawY;
+                f.outlierFrames = 1;
+                return f.filteredY;   // reject
+            }
+
+            f.outlierFrames++;
+            if (f.outlierFrames >= C.pitchOutlierConfirmFrames) {
+                // Confirmed real jump — re-seed to avoid slow convergence
+                f.filteredY = rawY;
+                f.outlierFrames = 0;
+                return f.filteredY;
+            }
+            return f.filteredY;       // still confirming, hold previous
+        }
+
+        f.outlierFrames = 0;
+
+        // --- Layer 2: hysteresis deadband ---
+        if (jumpSemitones < C.pitchHysteresisSemitones) {
+            return f.filteredY;       // suppress micro-oscillation
+        }
+
+        // --- Layer 3: fast EMA ---
+        const alpha = 1 - Math.exp(-C.pitchFilterEmaSpeed * Math.max(0, dt));
+        f.filteredY += (rawY - f.filteredY) * alpha;
+        return f.filteredY;
+    }
+
     setLiveState(liveState = null, dt = 1 / 60, elapsed = 0) {
         const state = liveState || {};
         const voiced = Boolean(state.active);
@@ -603,7 +687,10 @@ class LiveRingSystem {
                     this.smState = 'ATTACK_FROM_BOTTOM';
                     this.attackProgress = 0;
                     this.attackStartY = spawnY;
-                    this.attackTargetY = state.y ?? 0;
+                    this.pitchFilter.seeded = false;  // force fresh seed
+                    this.pitchFilter.outlierFrames = 0;
+                    const seedY = this._filterPitchY(state.y ?? 0, dt);
+                    this.attackTargetY = seedY;
                     this.displayY = spawnY;
                 }
                 break;
@@ -613,8 +700,8 @@ class LiveRingSystem {
                     // Voice lost during rise → immediately fall
                     this._enterRelease();
                 } else {
-                    // Keep attack target locked to latest real pitch
-                    this.attackTargetY = state.y ?? this.attackTargetY;
+                    // Filter the raw pitch — prevents target chatter during rise
+                    this.attackTargetY = this._filterPitchY(state.y ?? this.attackTargetY, dt);
                     const duration = Math.max(0.05, VISUAL_SCENE_CONFIG.ringEntryDurationSeconds);
                     this.attackProgress = Math.min(1, this.attackProgress + dt / duration);
                     const eased = 1 - Math.pow(1 - this.attackProgress, 3);
@@ -630,9 +717,9 @@ class LiveRingSystem {
                     // Voice ended → immediately release, no linger
                     this._enterRelease();
                 } else {
-                    // Smooth-follow the real pitch Y
-                    const targetY = state.y ?? this.displayY;
-                    this.displayY = this.smoothToward(this.displayY, targetY, VISUAL_SCENE_CONFIG.ringYSmoothingSpeed, dt);
+                    // Filter raw pitch, then smooth-follow the filtered target
+                    const filteredY = this._filterPitchY(state.y ?? this.displayY, dt);
+                    this.displayY = this.smoothToward(this.displayY, filteredY, VISUAL_SCENE_CONFIG.ringYSmoothingSpeed, dt);
                 }
                 break;
 
@@ -642,7 +729,10 @@ class LiveRingSystem {
                     this.smState = 'ATTACK_FROM_BOTTOM';
                     this.attackProgress = 0;
                     this.attackStartY = this.displayY;
-                    this.attackTargetY = state.y ?? 0;
+                    this.pitchFilter.seeded = false;  // force fresh seed
+                    this.pitchFilter.outlierFrames = 0;
+                    const seedY = this._filterPitchY(state.y ?? 0, dt);
+                    this.attackTargetY = seedY;
                 } else {
                     // Fall toward bottom — ignore any stale pitch
                     const exitDuration = Math.max(0.08, VISUAL_SCENE_CONFIG.ringExitDurationSeconds);
@@ -711,6 +801,9 @@ class LiveRingSystem {
         this.releaseStartHaloIntensity = this.ringState.haloIntensity;
         this.releaseStartThicknessEmphasis = this.ringState.thicknessEmphasis;
         this.releaseStartRadiusEmphasis = this.ringState.radiusEmphasis;
+        // Reset pitch filter so next voice onset seeds fresh
+        this.pitchFilter.seeded = false;
+        this.pitchFilter.outlierFrames = 0;
     }
 
     update(timeSeconds = 0, liveState = null, dt = 1 / 60) {
