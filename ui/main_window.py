@@ -465,10 +465,12 @@ class MainWindow(QMainWindow):
     def _open_manual_pair(self) -> None:
         if self._worker_thread is not None:
             return
-        media, _ = QFileDialog.getOpenFileName(self, "Open original media", "", _FILTER)
+        # Use this for now:
+        dir = "/home/yurii/.voice_music_visualizer/cache/a642eb18cb6a880bb09ff832/"
+        media, _ = QFileDialog.getOpenFileName(self, "Open original media", dir, _FILTER)
         if not media:
             return
-        vocals, _ = QFileDialog.getOpenFileName(self, "Open vocals stem", "", "Audio (*.wav *.mp3 *.flac *.ogg *.m4a *.aac)")
+        vocals, _ = QFileDialog.getOpenFileName(self, "Open vocals stem", dir, "Audio (*.wav *.mp3 *.flac *.ogg *.m4a *.aac)")
         if not vocals:
             return
         source_path = Path(media)
