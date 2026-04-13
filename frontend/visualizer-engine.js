@@ -42,21 +42,46 @@ const VISUAL_SCENE_CONFIG = {
     liveRingMinSigma: 0.018,
     liveRingMaxSigma: 0.09,
     liveRingCarrierSafetyMargin: 0.16,
-    ringYSmoothingSpeed: 16.0,
+    // Layer 3 render: slower and velocity-capped so big pitch jumps animate,
+    // not snap. ringYSmoothingSpeed was 16.0 — halved so the render layer
+    // adds genuine weight. ringYMaxSpeed is a hard cap in Y-units/second
+    // (~16 semitones/sec), preventing single-frame pops on large jumps.
+    ringYSmoothingSpeed: 7.0,
+    ringYMaxSpeed: 3.8,
     ringRadiusSmoothingSpeed: 10.0,
     ringVisibilityAttackSpeed: 20.0,
     ringVisibilityReleaseSpeed: 4.2,
     ringStateSmoothingSpeed: 8.0,
-    ringEntryDurationSeconds: 0.14,
+    // Attack is kept snappy; release stays calm.
+    ringEntryDurationSeconds: 0.12,
     ringExitDurationSeconds: 0.4,
 
-    // --- Pitch filter (between raw detector and render target) ---
+    // --- Pitch filter — 3-layer pipeline ---
+    //
+    //   rawY  →  [Layer 1: _filterPitchY]  →  filteredY
+    //         →  [Layer 2: targetY EMA]    →  targetY
+    //         →  [Layer 3: displayY, vel-capped EMA]  →  displayY
+    //
+    // Layer 1 (pitch domain): outlier rejection + hysteresis + EMA
+    //   pitchFilterEmaSpeed reduced 18→10: slower note-level EMA so
+    //   filteredY represents "the note being sung" not "instantaneous pitch".
+    //   pitchHysteresisSemitones raised 0.4→1.0: 1 semitone deadband
+    //   silences most vibrato and intonation wobble before it ever moves.
+    //   pitchOutlierSemitones tightened 4.0→3.0: rejects detector spikes.
+    //   pitchOutlierConfirmFrames raised 2→3: fewer false acceptances.
+    //
     // 1 semitone ≈ 0.06 in Y-space ( = ln(2^(1/12)) / ln(1500/80) * 3.05 )
     pitchSemitoneY: 0.06,
-    pitchFilterEmaSpeed: 18.0,
-    pitchOutlierSemitones: 4.0,
-    pitchOutlierConfirmFrames: 2,
-    pitchHysteresisSemitones: 0.4,
+    pitchFilterEmaSpeed: 10.0,
+    pitchOutlierSemitones: 3.0,
+    pitchOutlierConfirmFrames: 3,
+    pitchHysteresisSemitones: 1.0,
+
+    // Layer 2 (target domain): slow EMA on filteredY → targetY.
+    // This is the "held note" concept — targetY is stable, weighted,
+    // and changes only when the filtered pitch genuinely moves.
+    // Lower = more glide; 5.0 gives ~120ms half-life feel.
+    pitchTargetEmaSpeed: 5.0,
     ringEntrySpawnY: -1.88,
     ringReactivationOnThreshold: 0.26,
     ringReactivationOffThreshold: 0.13,
@@ -335,11 +360,13 @@ class LiveRingSystem {
         this.releaseStartThicknessEmphasis = 0;
         this.releaseStartRadiusEmphasis = 0;
         this.displayY = VISUAL_SCENE_CONFIG.ringEntrySpawnY;
-        // Pitch filter: sits between raw detector output and render target.
-        // Provides outlier rejection, hysteresis, and short-EMA smoothing
-        // in pitch-space so the Y target doesn't jump frame-to-frame.
+        // Pitch filter: 3-layer pipeline between raw detector and rendered position.
+        // Layer 1 (_filterPitchY): outlier rejection, hysteresis, fast EMA → filteredY
+        // Layer 2 (in setLiveState): slow EMA → targetY  (the "held note" concept)
+        // Layer 3 (in setLiveState): velocity-capped EMA → displayY  (rendered position)
         this.pitchFilter = {
             filteredY: 0,
+            targetY: VISUAL_SCENE_CONFIG.ringEntrySpawnY,
             seeded: false,
             outlierFrames: 0,
             pendingOutlierY: 0,
@@ -616,20 +643,23 @@ class LiveRingSystem {
     }
 
     /**
-     * Pitch-domain filter: rawY → filteredY.
+     * Layer 1 of the 3-layer pitch motion model: rawY → filteredY.
      *
-     * Three layers, evaluated in order:
-     *   1. Outlier rejection  — single-frame spikes > N semitones from
-     *      the current filtered pitch are held for confirmation. If the
-     *      new pitch persists for `pitchOutlierConfirmFrames`, it's accepted
-     *      as a genuine jump and the filter re-seeds.
-     *   2. Hysteresis deadband — changes smaller than ~0.4 semitones are
-     *      suppressed, eliminating adjacent-note chatter.
-     *   3. Fast EMA — everything else is tracked with a short time-constant
-     *      (pitchFilterEmaSpeed) that glides smoothly between notes.
+     * Operates entirely in pitch space. Does NOT smooth the ring position —
+     * that is handled by Layers 2 (targetY) and 3 (displayY) in setLiveState.
      *
-     * On voice onset the filter is unseeded; the first voiced frame
-     * seeds it directly (zero onset lag).
+     * Three sub-layers, evaluated in order:
+     *   1. Outlier rejection  — single-frame spikes > 3 semitones from the
+     *      current filtered pitch require `pitchOutlierConfirmFrames` frames
+     *      of consistency before being accepted as a genuine jump.
+     *   2. Hysteresis deadband — changes smaller than 1.0 semitone are
+     *      suppressed. This silences most vibrato, intonation wobble, and
+     *      detector noise before it reaches the rendering pipeline.
+     *   3. EMA — genuine pitch movement is tracked with a time-constant
+     *      set by pitchFilterEmaSpeed (now 10.0, slower than before).
+     *
+     * On voice onset the filter is unseeded; the first voiced frame seeds
+     * it directly so there is zero onset lag.
      */
     _filterPitchY(rawY, dt) {
         const f = this.pitchFilter;
@@ -718,6 +748,8 @@ class LiveRingSystem {
                     this.pitchFilter.outlierFrames = 0;
                     const seedY = this._filterPitchY(state.y ?? 0, dt);
                     this.attackTargetY = seedY;
+                    // Seed targetY so Layer 2 doesn't start from a stale position
+                    this.pitchFilter.targetY = seedY;
                     this.displayY = spawnY;
                 }
                 break;
@@ -729,6 +761,9 @@ class LiveRingSystem {
                 } else {
                     // Filter the raw pitch — prevents target chatter during rise
                     this.attackTargetY = this._filterPitchY(state.y ?? this.attackTargetY, dt);
+                    // Keep targetY aligned with the attack target so there is no
+                    // discontinuity when we hand off to TRACKING's Layer 2.
+                    this.pitchFilter.targetY = this.attackTargetY;
                     const duration = Math.max(0.05, VISUAL_SCENE_CONFIG.ringEntryDurationSeconds);
                     this.attackProgress = Math.min(1, this.attackProgress + dt / duration);
                     const eased = 1 - Math.pow(1 - this.attackProgress, 3);
@@ -744,9 +779,30 @@ class LiveRingSystem {
                     // Voice ended → immediately release, no linger
                     this._enterRelease();
                 } else {
-                    // Filter raw pitch, then smooth-follow the filtered target
+                    const C = VISUAL_SCENE_CONFIG;
+                    // --- Layer 1: pitch filter (outlier rejection + hysteresis + EMA) ---
+                    // filteredY represents "the note currently being sung", debounced.
                     const filteredY = this._filterPitchY(state.y ?? this.displayY, dt);
-                    this.displayY = this.smoothToward(this.displayY, filteredY, VISUAL_SCENE_CONFIG.ringYSmoothingSpeed, dt);
+
+                    // --- Layer 2: targetY — slow "held note" EMA ---
+                    // targetY trails filteredY with a longer time-constant so the
+                    // rendered target is stable. Vibrato/wobble that slips through
+                    // Layer 1 is further damped here. This is the key missing stage
+                    // in the old model.
+                    this.pitchFilter.targetY = this.smoothToward(
+                        this.pitchFilter.targetY, filteredY, C.pitchTargetEmaSpeed, dt);
+
+                    // --- Layer 3: displayY — velocity-capped render position ---
+                    // EMA gives the desired position this frame; the velocity cap
+                    // prevents any single frame from moving the ring more than
+                    // ringYMaxSpeed * dt units, regardless of how far the target
+                    // jumped. Large pitch changes animate fluidly; small changes
+                    // (within the deadband) produce no visible movement at all.
+                    const desired = this.smoothToward(
+                        this.displayY, this.pitchFilter.targetY, C.ringYSmoothingSpeed, dt);
+                    const maxStep = C.ringYMaxSpeed * dt;
+                    const rawStep = desired - this.displayY;
+                    this.displayY += MathUtils.clamp(rawStep, -maxStep, maxStep);
                 }
                 break;
 
@@ -760,6 +816,8 @@ class LiveRingSystem {
                     this.pitchFilter.outlierFrames = 0;
                     const seedY = this._filterPitchY(state.y ?? 0, dt);
                     this.attackTargetY = seedY;
+                    // Seed targetY so Layer 2 has a clean starting point
+                    this.pitchFilter.targetY = seedY;
                 } else {
                     // -------------------------------------------------------
                     // State D: ReleaseToBottom
@@ -844,9 +902,12 @@ class LiveRingSystem {
         this.releaseStartHaloIntensity = this.ringState.haloIntensity;
         this.releaseStartThicknessEmphasis = this.ringState.thicknessEmphasis;
         this.releaseStartRadiusEmphasis = this.ringState.radiusEmphasis;
-        // Reset pitch filter so next voice onset seeds fresh
+        // Reset pitch filter completely — next onset must seed fresh.
+        // targetY is reset to spawnY so Layer 2 doesn't carry stale pitch
+        // into the next attack.
         this.pitchFilter.seeded = false;
         this.pitchFilter.outlierFrames = 0;
+        this.pitchFilter.targetY = VISUAL_SCENE_CONFIG.ringEntrySpawnY;
     }
 
     update(timeSeconds = 0, liveState = null, dt = 1 / 60) {
