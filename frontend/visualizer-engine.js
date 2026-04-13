@@ -42,7 +42,7 @@ const VISUAL_SCENE_CONFIG = {
     liveRingMinSigma: 0.018,
     liveRingMaxSigma: 0.09,
     liveRingCarrierSafetyMargin: 0.16,
-    ringYSmoothingSpeed: 9.0,           // ↓ from 16 — slower display-layer Y smoothing
+    ringYSmoothingSpeed: 16.0,
     ringRadiusSmoothingSpeed: 10.0,
     ringVisibilityAttackSpeed: 20.0,
     ringVisibilityReleaseSpeed: 4.2,
@@ -53,16 +53,24 @@ const VISUAL_SCENE_CONFIG = {
     // --- Pitch filter (between raw detector and render target) ---
     // 1 semitone ≈ 0.06 in Y-space ( = ln(2^(1/12)) / ln(1500/80) * 3.05 )
     pitchSemitoneY: 0.06,
-    pitchFilterEmaSpeed: 9.0,           // ↓ from 18 — longer time-constant, less tracking jitter
-    pitchOutlierSemitones: 4.5,         // ↑ from 4.0 — fewer false large-jump detections
-    pitchOutlierConfirmFrames: 3,        // ↑ from 2 — need 3 consistent frames to confirm jump
-    pitchHysteresisSemitones: 1.2,       // ↑ from 0.4 — ~1 semitone sticky deadband (real note lock)
+    pitchFilterEmaSpeed: 18.0,
+    pitchOutlierSemitones: 4.0,
+    pitchOutlierConfirmFrames: 2,
+    pitchHysteresisSemitones: 0.4,
     ringEntrySpawnY: -1.88,
-    ringReleaseHoldFrames: 8,            // NEW — silent frames tolerated before triggering release
-    ringReactivationOnThreshold: 0.30,   // ↑ from 0.26 — stricter voice-on gate
+    ringReactivationOnThreshold: 0.26,
     ringReactivationOffThreshold: 0.13,
-    ringReactivationMinPitchConf: 0.22,  // ↑ from 0.14 — require higher-confidence pitch reads
-    ringReactivationMinLoudness: 0.03
+    ringReactivationMinPitchConf: 0.14,
+    ringReactivationMinLoudness: 0.03,
+
+    // --- Idle (BottomIdle) persistent visual state ---
+    // The ring is ALWAYS visible at the bottom. These values describe
+    // its appearance when no voice is present. Release animates TOWARD
+    // these values, not toward zero.
+    ringIdleVisibility: 0.38,
+    ringIdleRadius: 0.85,
+    ringIdleCoreIntensity: 0.0,
+    ringIdleHaloIntensity: 0.12
 };
 
 class BackgroundSystem {
@@ -290,22 +298,25 @@ class LiveRingSystem {
         this.liveRingMaxSigma = VISUAL_SCENE_CONFIG.liveRingMaxSigma;
         this.liveRingCarrierSafetyMargin = VISUAL_SCENE_CONFIG.liveRingCarrierSafetyMargin;
         this.liveRingCarrierExtent = 0;
+        // Idle (BottomIdle) is the DEFAULT state: ring is always visible at bottom.
+        // Initialise both current and target to idle values so the ring is
+        // visible from the very first frame — before any voice is ever detected.
         this.ringState = {
             y: VISUAL_SCENE_CONFIG.ringEntrySpawnY,
-            radius: 1.0,
-            visibility: 0,
-            coreIntensity: 0,
-            haloIntensity: 0,
+            radius: VISUAL_SCENE_CONFIG.ringIdleRadius,
+            visibility: VISUAL_SCENE_CONFIG.ringIdleVisibility,
+            coreIntensity: VISUAL_SCENE_CONFIG.ringIdleCoreIntensity,
+            haloIntensity: VISUAL_SCENE_CONFIG.ringIdleHaloIntensity,
             thicknessEmphasis: 0,
             radiusEmphasis: 0,
             color: new THREE.Color(0xffa338)
         };
         this.targetState = {
             y: VISUAL_SCENE_CONFIG.ringEntrySpawnY,
-            radius: 1.0,
-            visibility: 0,
-            coreIntensity: 0,
-            haloIntensity: 0,
+            radius: VISUAL_SCENE_CONFIG.ringIdleRadius,
+            visibility: VISUAL_SCENE_CONFIG.ringIdleVisibility,
+            coreIntensity: VISUAL_SCENE_CONFIG.ringIdleCoreIntensity,
+            haloIntensity: VISUAL_SCENE_CONFIG.ringIdleHaloIntensity,
             thicknessEmphasis: 0,
             radiusEmphasis: 0,
             color: new THREE.Color(0xffa338)
@@ -329,15 +340,10 @@ class LiveRingSystem {
         // in pitch-space so the Y target doesn't jump frame-to-frame.
         this.pitchFilter = {
             filteredY: 0,
-            stickyY: 0,        // anchor for hysteresis — only moves on confirmed note changes
             seeded: false,
             outlierFrames: 0,
             pendingOutlierY: 0,
         };
-        // Release debounce: consecutive frames without voiced signal before triggering release
-        this.voiceOffFrames = 0;
-        // Last state where active===true; replayed during the hold window
-        this._lastVoicedState = null;
         const baseDefinition = { y: -0.5, z: -0.72, r: 1.05, sigma: 0.032, coreOpacity: 0.92, haloOpacity: 0.46, color: 0xffa338 };
         const motion = {
             phase: 0.95,
@@ -613,53 +619,50 @@ class LiveRingSystem {
      * Pitch-domain filter: rawY → filteredY.
      *
      * Three layers, evaluated in order:
-     *   1. Outlier rejection  — large jumps (> pitchOutlierSemitones) vs the
-     *      current filtered position must persist for pitchOutlierConfirmFrames
-     *      consecutive frames before being accepted as a genuine note change.
-     *   2. Sticky hysteresis — measured against stickyY (a stable note anchor),
-     *      NOT against the moving filteredY.  This prevents micro-oscillations
-     *      from shifting the reference point and causing perpetual re-triggers.
-     *      Changes < pitchHysteresisSemitones from stickyY are suppressed; the
-     *      filter gently returns toward stickyY instead.
-     *   3. EMA — movements that exceed the deadband are tracked with a moderate
-     *      time-constant.  stickyY is promoted once the EMA settles < 0.5 st
-     *      from the raw signal, locking the anchor onto the new note.
+     *   1. Outlier rejection  — single-frame spikes > N semitones from
+     *      the current filtered pitch are held for confirmation. If the
+     *      new pitch persists for `pitchOutlierConfirmFrames`, it's accepted
+     *      as a genuine jump and the filter re-seeds.
+     *   2. Hysteresis deadband — changes smaller than ~0.4 semitones are
+     *      suppressed, eliminating adjacent-note chatter.
+     *   3. Fast EMA — everything else is tracked with a short time-constant
+     *      (pitchFilterEmaSpeed) that glides smoothly between notes.
      *
-     * On voice onset the filter is unseeded; the first voiced frame seeds both
-     * filteredY and stickyY directly (zero onset lag).
+     * On voice onset the filter is unseeded; the first voiced frame
+     * seeds it directly (zero onset lag).
      */
     _filterPitchY(rawY, dt) {
         const f = this.pitchFilter;
         const C = VISUAL_SCENE_CONFIG;
         const semiY = C.pitchSemitoneY;
 
-        // --- First voiced frame: seed both anchors directly, zero lag ---
+        // --- First voiced frame: seed directly, zero lag ---
         if (!f.seeded) {
-            f.filteredY     = rawY;
-            f.stickyY       = rawY;
-            f.seeded        = true;
+            f.filteredY = rawY;
+            f.seeded = true;
             f.outlierFrames = 0;
             return rawY;
         }
 
-        const jumpFromFiltered = Math.abs(rawY - f.filteredY) / semiY;
+        const jumpSemitones = Math.abs(rawY - f.filteredY) / semiY;
 
-        // --- Layer 1: outlier rejection (vs filtered, not sticky) ---
-        if (jumpFromFiltered > C.pitchOutlierSemitones) {
+        // --- Layer 1: outlier rejection ---
+        if (jumpSemitones > C.pitchOutlierSemitones) {
+            // Is this the same outlier direction as last frame?
             const consistentWithPending = f.outlierFrames > 0
                 && Math.abs(rawY - f.pendingOutlierY) / semiY < 2.0;
 
             if (!consistentWithPending) {
+                // New or inconsistent spike — start fresh confirmation
                 f.pendingOutlierY = rawY;
-                f.outlierFrames   = 1;
-                return f.filteredY;   // reject spike
+                f.outlierFrames = 1;
+                return f.filteredY;   // reject
             }
 
             f.outlierFrames++;
             if (f.outlierFrames >= C.pitchOutlierConfirmFrames) {
-                // Confirmed genuine large jump — re-seed both anchors
-                f.filteredY     = rawY;
-                f.stickyY       = rawY;
+                // Confirmed real jump — re-seed to avoid slow convergence
+                f.filteredY = rawY;
                 f.outlierFrames = 0;
                 return f.filteredY;
             }
@@ -668,29 +671,14 @@ class LiveRingSystem {
 
         f.outlierFrames = 0;
 
-        // --- Layer 2: sticky hysteresis (vs stickyY, the stable note anchor) ---
-        // Measuring against stickyY means the deadband does not drift with vocal
-        // vibrato — it stays centered on the last committed note until a real
-        // change pushes past the threshold.
-        const jumpFromSticky = Math.abs(rawY - f.stickyY) / semiY;
-        if (jumpFromSticky < C.pitchHysteresisSemitones) {
-            // Within deadband — gently pull filteredY back toward the sticky anchor
-            // so any drift accumulated by earlier EMA steps is corrected.
-            const returnAlpha = 1 - Math.exp(-6.0 * Math.max(0, dt));
-            f.filteredY += (f.stickyY - f.filteredY) * returnAlpha;
-            return f.filteredY;
+        // --- Layer 2: hysteresis deadband ---
+        if (jumpSemitones < C.pitchHysteresisSemitones) {
+            return f.filteredY;       // suppress micro-oscillation
         }
 
-        // --- Layer 3: EMA toward rawY (genuine note movement) ---
+        // --- Layer 3: fast EMA ---
         const alpha = 1 - Math.exp(-C.pitchFilterEmaSpeed * Math.max(0, dt));
         f.filteredY += (rawY - f.filteredY) * alpha;
-
-        // Promote stickyY once the EMA has settled within 0.5 st of the new note.
-        // This locks the hysteresis anchor onto the new pitch after each transition.
-        if (Math.abs(f.filteredY - rawY) / semiY < 0.5) {
-            f.stickyY = f.filteredY;
-        }
-
         return f.filteredY;
     }
 
@@ -698,60 +686,49 @@ class LiveRingSystem {
         const state = liveState || {};
         const voiced = Boolean(state.active);
         const spawnY = VISUAL_SCENE_CONFIG.ringEntrySpawnY;
-        const holdFrames = VISUAL_SCENE_CONFIG.ringReleaseHoldFrames || 8;
 
         // ================================================================
-        // VOICE HOLD BOOKKEEPING
-        //
-        // The raw voice-gate (`voiced`) can flicker off for 1–3 frames even
-        // during sustained singing (borderline pitch-confidence, breath noise).
-        // Rather than immediately firing RELEASE_FALL on the first silent frame,
-        // we count consecutive silent frames and only act after holdFrames have
-        // elapsed.  During the hold window we replay the last confident voiced
-        // state so brightness and radius do not drop.
-        // ================================================================
-        if (voiced) {
-            this.voiceOffFrames    = 0;
-            this._lastVoicedState  = state;
-        } else {
-            this.voiceOffFrames++;
-        }
-
-        // effectiveVoiced: true when signal is present OR within the hold window
-        const inHold         = !voiced && this.voiceOffFrames > 0 && this.voiceOffFrames <= holdFrames;
-        const effectiveVoiced = voiced || inHold;
-        // effectiveState: use the saved voiced state while holding to prevent
-        // visual props from snapping toward zero during a transient dropout.
-        const effectiveState  = (inHold && this._lastVoicedState) ? this._lastVoicedState : state;
-
-        // ================================================================
-        // STATE TRANSITIONS — effectiveVoiced drives all transitions.
+        // STATE TRANSITIONS — voice presence drives all transitions.
+        // No smoothing, no lingering, no stale data.
         // ================================================================
 
         switch (this.smState) {
             case 'IDLE':
-                if (effectiveVoiced) {
-                    // → ATTACK_FROM_BOTTOM: rise from bottom toward the real note
-                    this.smState       = 'ATTACK_FROM_BOTTOM';
+                // -------------------------------------------------------
+                // State A: BottomIdle — the ring's PERMANENT resting state.
+                // Enforce idle visuals every frame so visibility can never
+                // drift to zero here regardless of what entered this state.
+                // This is not a "nothing is happening" state — the ring is
+                // always visually present at the bottom.
+                // -------------------------------------------------------
+                this.ringState.visibility       = VISUAL_SCENE_CONFIG.ringIdleVisibility;
+                this.ringState.radius           = VISUAL_SCENE_CONFIG.ringIdleRadius;
+                this.ringState.coreIntensity    = VISUAL_SCENE_CONFIG.ringIdleCoreIntensity;
+                this.ringState.haloIntensity    = VISUAL_SCENE_CONFIG.ringIdleHaloIntensity;
+                this.ringState.thicknessEmphasis = 0;
+                this.ringState.radiusEmphasis   = 0;
+                this.displayY = spawnY;
+
+                if (voiced) {
+                    // → ATTACK_FROM_BOTTOM: rise from bottom toward the REAL note
+                    this.smState = 'ATTACK_FROM_BOTTOM';
                     this.attackProgress = 0;
-                    this.attackStartY   = spawnY;
-                    this.pitchFilter.seeded       = false;  // force fresh seed
+                    this.attackStartY = spawnY;
+                    this.pitchFilter.seeded = false;  // force fresh seed
                     this.pitchFilter.outlierFrames = 0;
-                    const seedYIdle = this._filterPitchY(effectiveState.y ?? 0, dt);
-                    this.attackTargetY = seedYIdle;
-                    this.displayY      = spawnY;
+                    const seedY = this._filterPitchY(state.y ?? 0, dt);
+                    this.attackTargetY = seedY;
+                    this.displayY = spawnY;
                 }
                 break;
 
             case 'ATTACK_FROM_BOTTOM':
-                if (!effectiveVoiced) {
-                    // Voice lost (and hold window expired) during rise → fall
+                if (!voiced) {
+                    // Voice lost during rise → immediately fall
                     this._enterRelease();
                 } else {
-                    // Only advance the pitch target when actually voiced (not during hold)
-                    if (voiced) {
-                        this.attackTargetY = this._filterPitchY(state.y ?? this.attackTargetY, dt);
-                    }
+                    // Filter the raw pitch — prevents target chatter during rise
+                    this.attackTargetY = this._filterPitchY(state.y ?? this.attackTargetY, dt);
                     const duration = Math.max(0.05, VISUAL_SCENE_CONFIG.ringEntryDurationSeconds);
                     this.attackProgress = Math.min(1, this.attackProgress + dt / duration);
                     const eased = 1 - Math.pow(1 - this.attackProgress, 3);
@@ -763,90 +740,100 @@ class LiveRingSystem {
                 break;
 
             case 'TRACKING':
-                if (!effectiveVoiced) {
-                    // Voice lost and hold expired → release fall
+                if (!voiced) {
+                    // Voice ended → immediately release, no linger
                     this._enterRelease();
                 } else {
-                    if (voiced) {
-                        // Active voice: advance filtered pitch and smooth displayY toward it
-                        const filteredY = this._filterPitchY(state.y ?? this.displayY, dt);
-                        this.displayY = this.smoothToward(
-                            this.displayY, filteredY, VISUAL_SCENE_CONFIG.ringYSmoothingSpeed, dt);
-                    }
-                    // inHold: displayY is intentionally frozen at last valid position
+                    // Filter raw pitch, then smooth-follow the filtered target
+                    const filteredY = this._filterPitchY(state.y ?? this.displayY, dt);
+                    this.displayY = this.smoothToward(this.displayY, filteredY, VISUAL_SCENE_CONFIG.ringYSmoothingSpeed, dt);
                 }
                 break;
 
             case 'RELEASE_FALL':
-                if (effectiveVoiced) {
-                    // Voice re-engaged (or hold brought it back) → fresh attack from wherever we are
-                    this.smState        = 'ATTACK_FROM_BOTTOM';
-                    this.attackProgress  = 0;
-                    this.attackStartY    = this.displayY;
-                    this.pitchFilter.seeded       = false;  // force fresh seed
+                if (voiced) {
+                    // New voice during fall → fresh attack from current position
+                    this.smState = 'ATTACK_FROM_BOTTOM';
+                    this.attackProgress = 0;
+                    this.attackStartY = this.displayY;
+                    this.pitchFilter.seeded = false;  // force fresh seed
                     this.pitchFilter.outlierFrames = 0;
-                    const seedYRelease = this._filterPitchY(effectiveState.y ?? 0, dt);
-                    this.attackTargetY  = seedYRelease;
+                    const seedY = this._filterPitchY(state.y ?? 0, dt);
+                    this.attackTargetY = seedY;
                 } else {
-                    // Fall toward bottom — ignore any stale pitch
+                    // -------------------------------------------------------
+                    // State D: ReleaseToBottom
+                    // Lerp TOWARD idle values (not toward 0).
+                    // The bottom is the destination, not invisibility.
+                    // Motion is strictly downward; no upward component possible
+                    // because releaseStartY >= spawnY and we lerp toward spawnY.
+                    // -------------------------------------------------------
                     const exitDuration = Math.max(0.08, VISUAL_SCENE_CONFIG.ringExitDurationSeconds);
                     this.releaseProgress = Math.min(1, this.releaseProgress + dt / exitDuration);
                     const eased = 1 - Math.pow(1 - this.releaseProgress, 2);
                     this.displayY = MathUtils.lerp(this.releaseStartY, spawnY, eased);
-                    this.ringState.radius = MathUtils.lerp(this.releaseStartRadius, this.releaseStartRadius * 0.92, eased);
-                    this.ringState.visibility = MathUtils.lerp(this.releaseStartVisibility, 0, eased);
-                    this.ringState.coreIntensity = MathUtils.lerp(this.releaseStartCoreIntensity, 0, eased);
-                    this.ringState.haloIntensity = MathUtils.lerp(this.releaseStartHaloIntensity, 0, eased);
+                    // Radius returns to idle size, not a scaled-down version of active
+                    this.ringState.radius = MathUtils.lerp(this.releaseStartRadius, VISUAL_SCENE_CONFIG.ringIdleRadius, eased);
+                    // Visibility fades BACK TO the idle base level — never to zero
+                    this.ringState.visibility = MathUtils.lerp(this.releaseStartVisibility, VISUAL_SCENE_CONFIG.ringIdleVisibility, eased);
+                    // Active intensities fall to their idle equivalents
+                    this.ringState.coreIntensity = MathUtils.lerp(this.releaseStartCoreIntensity, VISUAL_SCENE_CONFIG.ringIdleCoreIntensity, eased);
+                    this.ringState.haloIntensity = MathUtils.lerp(this.releaseStartHaloIntensity, VISUAL_SCENE_CONFIG.ringIdleHaloIntensity, eased);
                     this.ringState.thicknessEmphasis = MathUtils.lerp(this.releaseStartThicknessEmphasis, 0, eased);
                     this.ringState.radiusEmphasis = MathUtils.lerp(this.releaseStartRadiusEmphasis, 0, eased);
                     if (this.releaseProgress >= 1) {
+                        // -------------------------------------------------------
+                        // State E: BackToBottomIdle
+                        // Snap to IDLE. Set idle values explicitly here; the IDLE
+                        // case will also enforce them every frame going forward.
+                        // Under NO circumstances set visibility to 0 here.
+                        // -------------------------------------------------------
                         this.smState = 'IDLE';
                         this.displayY = spawnY;
-                        this.ringState.visibility        = 0;
-                        this.ringState.coreIntensity     = 0;
-                        this.ringState.haloIntensity     = 0;
+                        this.ringState.visibility       = VISUAL_SCENE_CONFIG.ringIdleVisibility;
+                        this.ringState.radius           = VISUAL_SCENE_CONFIG.ringIdleRadius;
+                        this.ringState.coreIntensity    = VISUAL_SCENE_CONFIG.ringIdleCoreIntensity;
+                        this.ringState.haloIntensity    = VISUAL_SCENE_CONFIG.ringIdleHaloIntensity;
                         this.ringState.thicknessEmphasis = 0;
-                        this.ringState.radiusEmphasis    = 0;
+                        this.ringState.radiusEmphasis   = 0;
                     }
                 }
                 break;
         }
 
         // ================================================================
-        // SMOOTH VISUAL PROPERTIES
-        //
-        // Uses effectiveState so the hold window keeps brightness/radius
-        // alive during brief silence gaps instead of snapping toward zero.
-        // Release drives its own interpolation above and is excluded here.
+        // SMOOTH VISUAL PROPERTIES (only when NOT in release — release
+        // drives its own interpolation above)
         // ================================================================
         if (this.smState !== 'RELEASE_FALL' && this.smState !== 'IDLE') {
-            this.targetState.radius           = effectiveState.radius           ?? this.targetState.radius;
-            this.targetState.visibility       = effectiveState.visibility       ?? this.targetState.visibility;
-            this.targetState.coreIntensity    = effectiveState.coreIntensity    ?? this.targetState.coreIntensity;
-            this.targetState.haloIntensity    = effectiveState.haloIntensity    ?? this.targetState.haloIntensity;
-            this.targetState.thicknessEmphasis = effectiveState.thicknessEmphasis ?? this.targetState.thicknessEmphasis;
-            this.targetState.radiusEmphasis   = effectiveState.radiusEmphasis   ?? this.targetState.radiusEmphasis;
+            this.targetState.radius = state.radius ?? this.targetState.radius;
+            this.targetState.visibility = state.visibility ?? this.targetState.visibility;
+            this.targetState.coreIntensity = state.coreIntensity ?? this.targetState.coreIntensity;
+            this.targetState.haloIntensity = state.haloIntensity ?? this.targetState.haloIntensity;
+            this.targetState.thicknessEmphasis = state.thicknessEmphasis ?? this.targetState.thicknessEmphasis;
+            this.targetState.radiusEmphasis = state.radiusEmphasis ?? this.targetState.radiusEmphasis;
 
             this.ringState.radius = this.smoothToward(this.ringState.radius, this.targetState.radius, VISUAL_SCENE_CONFIG.ringRadiusSmoothingSpeed, dt);
             const visibilitySpeed = this.targetState.visibility > this.ringState.visibility
                 ? VISUAL_SCENE_CONFIG.ringVisibilityAttackSpeed
                 : VISUAL_SCENE_CONFIG.ringVisibilityReleaseSpeed;
-            this.ringState.visibility        = this.smoothToward(this.ringState.visibility,        this.targetState.visibility,        visibilitySpeed,                               dt);
-            this.ringState.coreIntensity     = this.smoothToward(this.ringState.coreIntensity,     this.targetState.coreIntensity,     VISUAL_SCENE_CONFIG.ringStateSmoothingSpeed,   dt);
-            this.ringState.haloIntensity     = this.smoothToward(this.ringState.haloIntensity,     this.targetState.haloIntensity,     VISUAL_SCENE_CONFIG.ringStateSmoothingSpeed,   dt);
-            this.ringState.thicknessEmphasis = this.smoothToward(this.ringState.thicknessEmphasis, this.targetState.thicknessEmphasis, VISUAL_SCENE_CONFIG.ringStateSmoothingSpeed,   dt);
-            this.ringState.radiusEmphasis    = this.smoothToward(this.ringState.radiusEmphasis,    this.targetState.radiusEmphasis,    VISUAL_SCENE_CONFIG.ringStateSmoothingSpeed,   dt);
+            this.ringState.visibility = this.smoothToward(this.ringState.visibility, this.targetState.visibility, visibilitySpeed, dt);
+            this.ringState.coreIntensity = this.smoothToward(this.ringState.coreIntensity, this.targetState.coreIntensity, VISUAL_SCENE_CONFIG.ringStateSmoothingSpeed, dt);
+            this.ringState.haloIntensity = this.smoothToward(this.ringState.haloIntensity, this.targetState.haloIntensity, VISUAL_SCENE_CONFIG.ringStateSmoothingSpeed, dt);
+            this.ringState.thicknessEmphasis = this.smoothToward(this.ringState.thicknessEmphasis, this.targetState.thicknessEmphasis, VISUAL_SCENE_CONFIG.ringStateSmoothingSpeed, dt);
+            this.ringState.radiusEmphasis = this.smoothToward(this.ringState.radiusEmphasis, this.targetState.radiusEmphasis, VISUAL_SCENE_CONFIG.ringStateSmoothingSpeed, dt);
         }
 
         // Commit Y position
         this.ringState.y = this.displayY;
 
-        // Color tracking always uses effectiveState so color holds during gaps
-        if (effectiveState.color) {
-            this.ringState.color.lerp(effectiveState.color, 0.18);
-            this.targetState.color.copy(effectiveState.color);
+        // Color tracking (always)
+        if (state.color) {
+            this.ringState.color.lerp(state.color, 0.18);
+            this.targetState.color.copy(state.color);
         }
     }
+
     _enterRelease() {
         this.smState = 'RELEASE_FALL';
         this.releaseProgress = 0;
@@ -870,7 +857,10 @@ class LiveRingSystem {
         this.setLiveState(liveState, dt, timeSeconds);
 
         const visible = MathUtils.clamp(this.ringState.visibility, 0, 1);
-        this.liveRingGroup.visible = visible > 0.01;
+        // The ring is ALWAYS present — it is never hidden. The idle state
+        // keeps visibility at ringIdleVisibility (not zero), so this group
+        // is always visible. Opacity/opacity uniforms handle appearance.
+        this.liveRingGroup.visible = true;
         this.liveRingGroup.position.y = this.ringState.y;
 
         const liveRadiusRaw = this.base.radius * this.ringState.radius;
@@ -913,6 +903,9 @@ class LiveRingSystem {
 
     mapLiveRingState(audioState) {
         if (!audioState) {
+            // active:false → setLiveState routes to IDLE/RELEASE_FALL.
+            // Neither state reads state.visibility — IDLE enforces its own
+            // persistent idle visuals. visibility:0 here is a dead value.
             return { active: false, visibility: 0 };
         }
 
@@ -935,6 +928,8 @@ class LiveRingSystem {
                       && rawPitchNorm >= 0;
 
         if (!hasVoice) {
+            // Same note as above: active:false means setLiveState never reads
+            // state.visibility. Idle visuals are owned by the IDLE state case.
             return { active: false, visibility: 0 };
         }
 
