@@ -9,7 +9,7 @@ from __future__ import annotations
 import webbrowser
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal, Slot, QUrl
+from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal, Slot, QSettings, QUrl
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QComboBox,
@@ -46,6 +46,9 @@ from core.ws_server import WSServer
 _ACCEPT = " ".join(f"*{e}" for e in sorted(AUDIO_EXT | VIDEO_EXT))
 _FILTER = f"Audio / Video ({_ACCEPT})"
 _HTML = Path(__file__).parent.parent / "frontend" / "visualizer.html"
+_SETTINGS_ORG = "VoiceMusicVisualizer"
+_SETTINGS_APP = "VoiceMusicVisualizer"
+_LAST_OPEN_VOCALS_DIR_KEY = "last_open_vocals_dir"
 
 # ── Design tokens ──────────────────────────────────────────────────────────────
 _BG      = "#07111e"
@@ -305,6 +308,7 @@ class MainWindow(QMainWindow):
         self._pending_seek_seconds = 0.0
         self._pending_resume = False
         self._preprocessor = Preprocessor()
+        self._settings = QSettings(_SETTINGS_ORG, _SETTINGS_APP)
 
         try:
             self._ws = WSServer(self._live)
@@ -495,18 +499,24 @@ class MainWindow(QMainWindow):
     def _open_manual_pair(self) -> None:
         if self._worker_thread is not None:
             return
-        # Use this for now:
-        dir = "/home/yurii/.voice_music_visualizer/cache/a642eb18cb6a880bb09ff832/"
-        media, _ = QFileDialog.getOpenFileName(self, "Open original media", dir, _FILTER)
+        initial_dir = self._get_initial_open_vocals_dir()
+        media, _ = QFileDialog.getOpenFileName(self, "Open original media", str(initial_dir), _FILTER)
         if not media:
             return
-        vocals, _ = QFileDialog.getOpenFileName(self, "Open vocals stem", dir, "Audio (*.wav *.mp3 *.flac *.ogg *.m4a *.aac)")
+        vocals_initial_dir = self._normalize_existing_dir(Path(media).parent) or initial_dir
+        vocals, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open vocals stem",
+            str(vocals_initial_dir),
+            "Audio (*.wav *.mp3 *.flac *.ogg *.m4a *.aac)",
+        )
         if not vocals:
             return
         source_path = Path(media)
         vocals_path = Path(vocals)
         self._source_path = source_path
         self._prepared = self._preprocessor.build_external_prepared(source_path, vocals_path)
+        self._save_last_open_vocals_dir(source_path.parent)
         self._player.stop()
         self._buffer.reset()
         self._live.reset()
@@ -517,6 +527,36 @@ class MainWindow(QMainWindow):
         self._slider.setValue(0)
         self._set_file_label("Loading external vocals stem…", "blue")
         self._start_prepare_worker(source_path=None, prepared_media=self._prepared)
+
+    def _normalize_existing_dir(self, path: Path | str | None) -> Path | None:
+        if path is None:
+            return None
+        try:
+            normalized = Path(path).expanduser().resolve(strict=False)
+        except (RuntimeError, OSError, TypeError, ValueError):
+            return None
+        if normalized.exists() and normalized.is_dir():
+            return normalized
+        return None
+
+    def _get_initial_open_vocals_dir(self) -> Path:
+        persisted = self._settings.value(_LAST_OPEN_VOCALS_DIR_KEY, "", str)
+        persisted_dir = self._normalize_existing_dir(persisted)
+        if persisted_dir is not None:
+            return persisted_dir
+
+        cache_dir = self._normalize_existing_dir(self._preprocessor.cache_base_dir())
+        if cache_dir is not None:
+            return cache_dir
+
+        return Path.home()
+
+    def _save_last_open_vocals_dir(self, path: Path) -> None:
+        valid_dir = self._normalize_existing_dir(path)
+        if valid_dir is None:
+            return
+        self._settings.setValue(_LAST_OPEN_VOCALS_DIR_KEY, str(valid_dir))
+        self._settings.sync()
 
     def _preprocess_only(self) -> None:
         if self._worker_thread is not None:
