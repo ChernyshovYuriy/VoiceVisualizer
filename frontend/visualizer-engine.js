@@ -19,15 +19,15 @@ const VISUAL_SCENE_CONFIG = {
     bandOpacity: 0.24,
     bandSoftness: 1.6,
     axisOpacity: 0.12,
-    axisHeight: 2.6,
-    // Camera settings — wide enough to show full ring at all Y positions
-    cameraDistance: 11.0,
+    axisHeight: 12.0, // Expanded to match new vertical range
+    // Camera settings — pulled back to show massive vertical movement
+    cameraDistance: 16.5,
     cameraFOV: 46,
     cameraTargetY: 0.0,
     depthAttenuation: 0.12,
     pitchBandCount: 9,
 
-    // Fast, responsive rings (Y range now comfortably inside view)
+    // Fast, responsive rings
     innerRing: {
         minRadius: 0.55,
         maxRadius: 1.3,
@@ -37,11 +37,10 @@ const VISUAL_SCENE_CONFIG = {
         glowIntensity: 1.3,
         colorHueMin: 0.05,
         colorHueMax: 0.55,
-        yRange: [-0.7, 0.9],    // tighter range — ring always fully in frame
+        yRange: [-4.0, 4.0],    // MASSIVE vertical range
         ySmoothing: 20.0,
-        radiusSmoothing: 12.0,  // slower to avoid sudden size jumps
+        radiusSmoothing: 12.0,
         opacitySmoothing: 12.0,
-        // Ring plane centered near world origin (less perspective edge-clip)
         zOffset: 0.0,
     },
     outerRing: {
@@ -53,7 +52,7 @@ const VISUAL_SCENE_CONFIG = {
         glowIntensity: 1.0,
         colorHueMin: 0.55,
         colorHueMax: 0.15,
-        yRange: [-0.7, 0.9],
+        yRange: [-4.0, 4.0],    // MASSIVE vertical range
         ySmoothing: 18.0,
         radiusSmoothing: 10.0,
         opacitySmoothing: 10.0,
@@ -75,11 +74,11 @@ const VISUAL_SCENE_CONFIG = {
     ringHoverVisibility: 0.3,
     ringHoverRadius: 0.9,
 
-    // Smooth pitch tracking — ignore sudden jumps
-    pitchFilterEmaSpeed: 8.0,   // was 25 — much slower EMA for stability
-    pitchOutlierSemitones: 2.0, // tighter outlier gate
+    // Smooth pitch tracking — boosted for extreme vertical responsiveness
+    pitchFilterEmaSpeed: 15.0,
+    pitchOutlierSemitones: 2.0,
     pitchOutlierConfirmFrames: 2,
-    pitchTargetEmaSpeed: 6.0,   // was 25 — ring follows pitch gently
+    pitchTargetEmaSpeed: 15.0,
 
     // Activation – low threshold for immediate response
     ringActivationPitchConfFloor: 0.02,
@@ -108,7 +107,7 @@ const VISUAL_SCENE_CONFIG = {
     echoExpandSpeeds: [0.25, 0.2, 0.15],
 };
 
-// --- Background, PitchBand, StageBase (unchanged, but with larger extents) ---
+// --- Background, PitchBand, StageBase ---
 class BackgroundSystem {
     constructor(scene) {
         const domeGeometry = new THREE.SphereGeometry(48, 64, 64);
@@ -170,7 +169,7 @@ class PitchBandSystem {
     constructor(scene) {
         this.group = new THREE.Group();
         scene.add(this.group);
-        const yMin = -2.4, yMax = 2.6;
+        const yMin = -4.5, yMax = 4.5; // Expanded to cover new massive vertical range
         const count = VISUAL_SCENE_CONFIG.pitchBandCount;
         const gap = (yMax - yMin) / (count - 1);
         const centers = [], colors = [];
@@ -225,7 +224,7 @@ class PitchBandSystem {
                     if (weightAccum < 0.0005) discard;
                     float distanceFactor = clamp(1.0 - vViewDepth * uDepthK, 0.3, 1.0);
                     float sideFalloff = exp(-pow(vWorldPos.x * 0.11, 2.0));
-                    float verticalWindow = exp(-pow(vWorldPos.y * 0.18, 2.0));
+                    float verticalWindow = exp(-pow(vWorldPos.y * 0.05, 2.0)); // Widened to allow taller visibility
                     float alpha = (weightAccum / float(max(uCount, 1))) * uOpacity * sideFalloff;
                     alpha *= mix(0.5, 1.0, verticalWindow) * distanceFactor;
                     alpha *= 0.9 + 0.1 * sin(vWorldPos.y * 2.0 + uTime * 0.5);
@@ -235,7 +234,7 @@ class PitchBandSystem {
                 }
             `
         });
-        const fogPlane = new THREE.Mesh(new THREE.PlaneGeometry(20.0, 14.0, 1, 1), material);
+        const fogPlane = new THREE.Mesh(new THREE.PlaneGeometry(30.0, 24.0, 1, 1), material); // Expanded geometry
         fogPlane.position.set(0, 0, -4.2);
         this.group.add(fogPlane);
         const echoPlane = fogPlane.clone();
@@ -301,14 +300,14 @@ class StageBaseSystem {
         const baseMesh = new THREE.Mesh(new THREE.CircleGeometry(6.0, 96), baseMaterial);
         baseMesh.rotation.x = -Math.PI / 2;
         baseMesh.scale.set(1.6, 1.0, 1.1);
-        baseMesh.position.set(0, -2.1, -1.2);
+        baseMesh.position.set(0, -5.0, -1.2); // Dropped down to fit massive vertical space
         this.group.add(baseMesh);
         this.material = baseMaterial;
     }
     update(time) { if (this.material) this.material.uniforms.uTime.value = time; }
 }
 
-// --- Particle System (unchanged) ---
+// --- Particle System ---
 class ParticleSystem {
     constructor(scene, ringRadiusRef = () => 1.2) {
         this.scene = scene;
@@ -396,13 +395,13 @@ class ParticleSystem {
     }
 }
 
-// --- Fast, responsive DualRingSystem with corrected Z positions ---
+// --- Fast, responsive DualRingSystem ---
 class DualRingSystem {
     constructor(scene) {
         this.group = new THREE.Group();
         scene.add(this.group);
-        const extent = 8.0;          // larger plane — ring can never clip geometry edge
-        const halfExtent = extent / 2; // 4.0 — used to normalize scene-unit radius to UV space
+        const extent = 8.0;
+        const halfExtent = extent / 2;
         const innerMat = new THREE.ShaderMaterial({
             transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
             uniforms: {
@@ -422,7 +421,6 @@ class DualRingSystem {
                 uniform float uThickness; uniform float uOpacity;
                 uniform float uGlowIntensity; uniform float uTime; uniform float uPulse;
                 void main() {
-                    // Map UV to scene-unit coordinates so uRadius is in scene units
                     vec2 c = (vUv * 2.0 - 1.0) * uExtentHalf;
                     float r = length(c);
                     float dist = abs(r - uRadius);
@@ -445,7 +443,6 @@ class DualRingSystem {
         this.innerRing = innerMesh;
         this.innerMat = innerMat;
 
-        // Outer ring – at z = -0.25
         const outerMat = new THREE.ShaderMaterial({
             transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
             uniforms: {
@@ -497,17 +494,17 @@ class DualRingSystem {
             outerColor: new THREE.Color(0x44aaff),
             onsetFlash: 0,
         };
-        this.displayY = -0.7;  // start at bottom of new yRange
+        this.displayY = -4.0;  // start at bottom of new massive yRange
         this.smState = 'IDLE';
         this.attackProgress = 0;
-        this.attackStartY = -0.7;
+        this.attackStartY = -4.0;
         this.attackTargetY = 0;
         this.hoverProgress = 0;
         this.releaseProgress = 0;
         this.lastOnset = 0;
 
-        // Pitch filter - very fast
-        this.pitchFilter = { filteredY: -0.7, seeded: false, lastRawY: -0.7 };
+        // Pitch filter - updated to handle large dynamic range
+        this.pitchFilter = { filteredY: -4.0, seeded: false, lastRawY: -4.0 };
 
         this.particleSystem = new ParticleSystem(scene, () => this.ringState.innerRadius);
         this.echoItems = [];
@@ -602,7 +599,10 @@ class DualRingSystem {
     _filterPitchY(rawY, dt) {
         const f = this.pitchFilter;
         if (!f.seeded) { f.filteredY = rawY; f.seeded = true; f.lastRawY = rawY; return rawY; }
-        const maxDelta = 0.06;  // was 0.25 — much tighter to suppress sudden peaks
+
+        // Vastly increased maxDelta to prevent clamping the extreme pitch jumps
+        // that are required for a visually notable vertical scale
+        const maxDelta = 0.8;
         let clamped = rawY;
         if (Math.abs(rawY - f.lastRawY) > maxDelta) clamped = f.lastRawY + Math.sign(rawY - f.lastRawY) * maxDelta;
         f.lastRawY = clamped;
@@ -621,14 +621,14 @@ class DualRingSystem {
         const voiced = liveState?.active || false;
         const pitchNorm = MathUtils.clamp(liveState?.pitchNorm ?? 0.5, 0, 1);
         const rawLoudNorm = MathUtils.clamp(liveState?.loudNorm ?? 0, 0, 1);
-        // Smooth loudness separately to avoid radius jumping on transient peaks
+
         if (this._smoothLoud === undefined) this._smoothLoud = rawLoudNorm;
         this._smoothLoud = this.smoothToward(this._smoothLoud, rawLoudNorm, 5.0, dt);
         const loudNorm = this._smoothLoud;
         const onset = MathUtils.clamp(liveState?.onset ?? 0, 0, 1);
         const confidence = MathUtils.clamp(liveState?.pitchConf ?? 0, 0, 1);
 
-        const rawY = liveState?.y ?? -1.5;
+        const rawY = liveState?.y ?? -4.0; // Default to new bottom
         const filteredY = this._filterPitchY(rawY, dt);
 
         const targetInnerRadius = VISUAL_SCENE_CONFIG.innerRing.minRadius + loudNorm * (VISUAL_SCENE_CONFIG.innerRing.maxRadius - VISUAL_SCENE_CONFIG.innerRing.minRadius);
@@ -638,7 +638,7 @@ class DualRingSystem {
         const targetInnerColor = this.colorFromPitchNorm(pitchNorm, true);
         const targetOuterColor = this.colorFromPitchNorm(pitchNorm, false);
 
-        // State machine - fast transitions
+        // State machine
         switch (this.smState) {
             case 'IDLE':
                 if (voiced) { this.smState = 'ATTACK'; this.attackProgress = 0; this.attackStartY = this.displayY; this.attackTargetY = filteredY; }
@@ -676,14 +676,14 @@ class DualRingSystem {
                         this.displayY = this.releaseStartY + VISUAL_SCENE_CONFIG.releaseFloatRise * p;
                     } else {
                         const p = (this.releaseProgress - VISUAL_SCENE_CONFIG.releaseFloatDuration / totalDur) / (1 - VISUAL_SCENE_CONFIG.releaseFloatDuration / totalDur);
-                        this.displayY = (this.releaseStartY + VISUAL_SCENE_CONFIG.releaseFloatRise) * (1 - p) + (-0.7) * p;
+                        this.displayY = (this.releaseStartY + VISUAL_SCENE_CONFIG.releaseFloatRise) * (1 - p) + (-4.0) * p; // Return to new bottom
                     }
-                    if (this.releaseProgress >= 1) { this.smState = 'IDLE'; this.displayY = -0.7; }
+                    if (this.releaseProgress >= 1) { this.smState = 'IDLE'; this.displayY = -4.0; } // Lock to bottom
                 }
                 break;
         }
 
-        // Apply smoothing to radius, opacity, color (faster)
+        // Apply smoothing to radius, opacity, color
         const rSpeed = VISUAL_SCENE_CONFIG.innerRing.radiusSmoothing;
         const oSpeed = VISUAL_SCENE_CONFIG.innerRing.opacitySmoothing;
         this.ringState.innerRadius = this.smoothToward(this.ringState.innerRadius, targetInnerRadius, rSpeed, dt);
@@ -799,7 +799,7 @@ class AxisSystem {
                 uniform vec3 uCore; uniform vec3 uHalo; uniform float uOpacity;
                 void main(){
                     float r = length(vPos.xz);
-                    float yFade = smoothstep(1.2, 0.2, abs(vPos.y));
+                    float yFade = smoothstep(5.0, 1.0, abs(vPos.y)); // Scaled fade to match massive height
                     float core = exp(-pow(r * 36.0, 2.0));
                     float halo = exp(-pow(r * 12.5, 2.0));
                     float alpha = (core * 0.45 + halo * 0.16) * yFade * uOpacity;
@@ -808,14 +808,13 @@ class AxisSystem {
                 }
             `
         });
-        const axisMesh = new THREE.Mesh(new THREE.CylinderGeometry(0.01, 0.008, 2.6 * 0.72, 20, 1, true), axisMat);
+        const axisMesh = new THREE.Mesh(new THREE.CylinderGeometry(0.01, 0.008, 12.0, 20, 1, true), axisMat); // Massive cylinder height
         axisMesh.position.y = 0.05;
         this.group.add(axisMesh);
     }
     update() {}
 }
 
-// --- CameraSystem with adjusted parameters to avoid cropping ---
 class CameraSystem {
     constructor(camera) {
         this.camera = camera;
@@ -831,7 +830,7 @@ class CameraSystem {
     update() {}
 }
 
-// --- Main Engine (unchanged) ---
+// --- Main Engine ---
 class VisualizerEngine {
     constructor(canvasId, audioManager) {
         this.audio = audioManager;
@@ -877,7 +876,7 @@ class VisualizerEngine {
         this.orbitControls = new THREE.OrbitControls(this.camera, this.renderer.domElement);
         this.orbitControls.enableRotate = true; this.orbitControls.enableZoom = true;
         this.orbitControls.target.copy(this.systems.camera.target);
-        this.orbitControls.minDistance = 3.2; this.orbitControls.maxDistance = 14.0;
+        this.orbitControls.minDistance = 3.2; this.orbitControls.maxDistance = 25.0;
         this.orbitControls.update();
     }
     setupDebugLabel() { if (this.debugLabel) this.debugLabel.style.display = this.debugView ? 'block' : 'none'; }
