@@ -19,15 +19,13 @@ const VISUAL_SCENE_CONFIG = {
     bandOpacity: 0.24,
     bandSoftness: 1.6,
     axisOpacity: 0.12,
-    axisHeight: 12.0, // Expanded to match new vertical range
-    // Camera settings — pulled back to show massive vertical movement
+    axisHeight: 12.0,
     cameraDistance: 16.5,
     cameraFOV: 46,
     cameraTargetY: 0.0,
     depthAttenuation: 0.12,
     pitchBandCount: 9,
 
-    // Fast, responsive rings
     innerRing: {
         minRadius: 0.55,
         maxRadius: 1.3,
@@ -37,7 +35,7 @@ const VISUAL_SCENE_CONFIG = {
         glowIntensity: 1.3,
         colorHueMin: 0.05,
         colorHueMax: 0.55,
-        yRange: [-4.0, 4.0],    // MASSIVE vertical range
+        yRange: [-4.0, 4.0],
         ySmoothing: 20.0,
         radiusSmoothing: 12.0,
         opacitySmoothing: 12.0,
@@ -52,7 +50,7 @@ const VISUAL_SCENE_CONFIG = {
         glowIntensity: 1.0,
         colorHueMin: 0.55,
         colorHueMax: 0.15,
-        yRange: [-4.0, 4.0],    // MASSIVE vertical range
+        yRange: [-4.0, 4.0],
         ySmoothing: 18.0,
         radiusSmoothing: 10.0,
         opacitySmoothing: 10.0,
@@ -67,36 +65,31 @@ const VISUAL_SCENE_CONFIG = {
         burstLifetime: 0.8,
     },
 
-    // Fast transitions
-    ringEntryDurationSeconds: 0.10,
+    ringEntryDurationSeconds: 0.15, // Slightly slower entry for better blending from "sticky" position
     ringExitDurationSeconds: 0.30,
     ringHoverDuration: 0.5,
     ringHoverVisibility: 0.3,
     ringHoverRadius: 0.9,
 
-    // Smooth pitch tracking — boosted for extreme vertical responsiveness
     pitchFilterEmaSpeed: 15.0,
     pitchOutlierSemitones: 2.0,
     pitchOutlierConfirmFrames: 2,
     pitchTargetEmaSpeed: 15.0,
 
-    // Activation – low threshold for immediate response
     ringActivationPitchConfFloor: 0.02,
     ringReactivationOnThreshold: 0.12,
     ringReactivationOffThreshold: 0.08,
     ringReactivationMinPitchConf: 0.05,
     ringReactivationMinLoudness: 0.02,
 
-    // Idle
     ringIdleVisibility: 0.25,
     ringIdleRadius: 0.8,
     ringIdleBreathAmp: 0.04,
     ringIdleBreathSpeed: 0.5,
 
-    // Release effect
-    releaseFloatRise: 0.12,
-    releaseFloatDuration: 0.6,
-    releaseReturnDuration: 1.0,
+    releaseFloatRise: 0.05, // Subtle upward float on release
+    releaseFloatDuration: 0.4,
+    releaseReturnDuration: 0.1, // Near-instant finish to "stay put"
 
     ghostRingEnabled: true,
     ghostRingFadeSpeed: 1.5,
@@ -107,7 +100,6 @@ const VISUAL_SCENE_CONFIG = {
     echoExpandSpeeds: [0.25, 0.2, 0.15],
 };
 
-// --- Background, PitchBand, StageBase ---
 class BackgroundSystem {
     constructor(scene) {
         const domeGeometry = new THREE.SphereGeometry(48, 64, 64);
@@ -169,7 +161,7 @@ class PitchBandSystem {
     constructor(scene) {
         this.group = new THREE.Group();
         scene.add(this.group);
-        const yMin = -4.5, yMax = 4.5; // Expanded to cover new massive vertical range
+        const yMin = -4.5, yMax = 4.5;
         const count = VISUAL_SCENE_CONFIG.pitchBandCount;
         const gap = (yMax - yMin) / (count - 1);
         const centers = [], colors = [];
@@ -224,7 +216,7 @@ class PitchBandSystem {
                     if (weightAccum < 0.0005) discard;
                     float distanceFactor = clamp(1.0 - vViewDepth * uDepthK, 0.3, 1.0);
                     float sideFalloff = exp(-pow(vWorldPos.x * 0.11, 2.0));
-                    float verticalWindow = exp(-pow(vWorldPos.y * 0.05, 2.0)); // Widened to allow taller visibility
+                    float verticalWindow = exp(-pow(vWorldPos.y * 0.05, 2.0));
                     float alpha = (weightAccum / float(max(uCount, 1))) * uOpacity * sideFalloff;
                     alpha *= mix(0.5, 1.0, verticalWindow) * distanceFactor;
                     alpha *= 0.9 + 0.1 * sin(vWorldPos.y * 2.0 + uTime * 0.5);
@@ -234,7 +226,7 @@ class PitchBandSystem {
                 }
             `
         });
-        const fogPlane = new THREE.Mesh(new THREE.PlaneGeometry(30.0, 24.0, 1, 1), material); // Expanded geometry
+        const fogPlane = new THREE.Mesh(new THREE.PlaneGeometry(30.0, 24.0, 1, 1), material);
         fogPlane.position.set(0, 0, -4.2);
         this.group.add(fogPlane);
         const echoPlane = fogPlane.clone();
@@ -300,14 +292,13 @@ class StageBaseSystem {
         const baseMesh = new THREE.Mesh(new THREE.CircleGeometry(6.0, 96), baseMaterial);
         baseMesh.rotation.x = -Math.PI / 2;
         baseMesh.scale.set(1.6, 1.0, 1.1);
-        baseMesh.position.set(0, -5.0, -1.2); // Dropped down to fit massive vertical space
+        baseMesh.position.set(0, -5.0, -1.2);
         this.group.add(baseMesh);
         this.material = baseMaterial;
     }
     update(time) { if (this.material) this.material.uniforms.uTime.value = time; }
 }
 
-// --- Particle System ---
 class ParticleSystem {
     constructor(scene, ringRadiusRef = () => 1.2) {
         this.scene = scene;
@@ -395,7 +386,6 @@ class ParticleSystem {
     }
 }
 
-// --- Fast, responsive DualRingSystem ---
 class DualRingSystem {
     constructor(scene) {
         this.group = new THREE.Group();
@@ -483,7 +473,6 @@ class DualRingSystem {
         this.outerRing = outerMesh;
         this.outerMat = outerMat;
 
-        // State
         this.ringState = {
             innerY: 0, outerY: 0,
             innerRadius: VISUAL_SCENE_CONFIG.ringIdleRadius,
@@ -494,7 +483,7 @@ class DualRingSystem {
             outerColor: new THREE.Color(0x44aaff),
             onsetFlash: 0,
         };
-        this.displayY = -4.0;  // start at bottom of new massive yRange
+        this.displayY = -4.0;
         this.smState = 'IDLE';
         this.attackProgress = 0;
         this.attackStartY = -4.0;
@@ -503,9 +492,7 @@ class DualRingSystem {
         this.releaseProgress = 0;
         this.lastOnset = 0;
 
-        // Pitch filter - updated to handle large dynamic range
         this.pitchFilter = { filteredY: -4.0, seeded: false, lastRawY: -4.0 };
-
         this.particleSystem = new ParticleSystem(scene, () => this.ringState.innerRadius);
         this.echoItems = [];
         this._createEchoPool();
@@ -600,8 +587,6 @@ class DualRingSystem {
         const f = this.pitchFilter;
         if (!f.seeded) { f.filteredY = rawY; f.seeded = true; f.lastRawY = rawY; return rawY; }
 
-        // Vastly increased maxDelta to prevent clamping the extreme pitch jumps
-        // that are required for a visually notable vertical scale
         const maxDelta = 0.8;
         let clamped = rawY;
         if (Math.abs(rawY - f.lastRawY) > maxDelta) clamped = f.lastRawY + Math.sign(rawY - f.lastRawY) * maxDelta;
@@ -628,7 +613,7 @@ class DualRingSystem {
         const onset = MathUtils.clamp(liveState?.onset ?? 0, 0, 1);
         const confidence = MathUtils.clamp(liveState?.pitchConf ?? 0, 0, 1);
 
-        const rawY = liveState?.y ?? -4.0; // Default to new bottom
+        const rawY = liveState?.y ?? this.displayY; // Default to CURRENT Y if no voice data
         const filteredY = this._filterPitchY(rawY, dt);
 
         const targetInnerRadius = VISUAL_SCENE_CONFIG.innerRing.minRadius + loudNorm * (VISUAL_SCENE_CONFIG.innerRing.maxRadius - VISUAL_SCENE_CONFIG.innerRing.minRadius);
@@ -638,52 +623,86 @@ class DualRingSystem {
         const targetInnerColor = this.colorFromPitchNorm(pitchNorm, true);
         const targetOuterColor = this.colorFromPitchNorm(pitchNorm, false);
 
-        // State machine
+        // STICKY STATE MACHINE
         switch (this.smState) {
             case 'IDLE':
-                if (voiced) { this.smState = 'ATTACK'; this.attackProgress = 0; this.attackStartY = this.displayY; this.attackTargetY = filteredY; }
+                // Remain at current displayY (no drop to bottom)
+                if (voiced) {
+                    this.smState = 'ATTACK';
+                    this.attackProgress = 0;
+                    this.attackStartY = this.displayY;
+                    this.attackTargetY = filteredY;
+                }
                 break;
+
             case 'ATTACK':
-                if (!voiced) { this.smState = 'RELEASE'; this.releaseProgress = 0; this.releaseStartY = this.displayY; }
+                if (!voiced) {
+                    this.smState = 'RELEASE';
+                    this.releaseProgress = 0;
+                    this.releaseStartY = this.displayY;
+                }
                 else {
                     this.attackProgress = Math.min(1, this.attackProgress + dt / VISUAL_SCENE_CONFIG.ringEntryDurationSeconds);
+                    // Move from wherever we were to the new note Y
                     this.displayY = MathUtils.lerp(this.attackStartY, this.attackTargetY, this.attackProgress);
                     if (this.attackProgress >= 1) this.smState = 'TRACKING';
                 }
                 break;
+
             case 'TRACKING':
-                if (!voiced) { this.smState = 'HOVER'; this.hoverProgress = 0; this.hoverStartY = this.displayY; }
+                if (!voiced) {
+                    this.smState = 'HOVER';
+                    this.hoverProgress = 0;
+                    this.hoverStartY = this.displayY;
+                }
                 else {
                     const speed = VISUAL_SCENE_CONFIG.pitchTargetEmaSpeed;
                     this.displayY = this.smoothToward(this.displayY, filteredY, speed, dt);
                 }
                 break;
+
             case 'HOVER':
-                if (voiced) { this.smState = 'ATTACK'; this.attackProgress = 0; this.attackStartY = this.displayY; this.attackTargetY = filteredY; }
+                if (voiced) {
+                    this.smState = 'ATTACK';
+                    this.attackProgress = 0;
+                    this.attackStartY = this.displayY;
+                    this.attackTargetY = filteredY;
+                }
                 else {
                     this.hoverProgress = Math.min(1, this.hoverProgress + dt / VISUAL_SCENE_CONFIG.ringHoverDuration);
-                    this.displayY = this.hoverStartY * (1 - this.hoverProgress * 0.3);
-                    if (this.hoverProgress >= 1) { this.smState = 'RELEASE'; this.releaseProgress = 0; this.releaseStartY = this.displayY; }
+                    // Stay largely in place during hover phase
+                    if (this.hoverProgress >= 1) {
+                        this.smState = 'RELEASE';
+                        this.releaseProgress = 0;
+                        this.releaseStartY = this.displayY;
+                    }
                 }
                 break;
+
             case 'RELEASE':
-                if (voiced) { this.smState = 'ATTACK'; this.attackProgress = 0; this.attackStartY = this.displayY; this.attackTargetY = filteredY; }
+                if (voiced) {
+                    this.smState = 'ATTACK';
+                    this.attackProgress = 0;
+                    this.attackStartY = this.displayY;
+                    this.attackTargetY = filteredY;
+                }
                 else {
                     const totalDur = VISUAL_SCENE_CONFIG.releaseFloatDuration + VISUAL_SCENE_CONFIG.releaseReturnDuration;
                     this.releaseProgress = Math.min(1, this.releaseProgress + dt / totalDur);
+
+                    // Minor "float" rise when note stops
                     if (this.releaseProgress <= VISUAL_SCENE_CONFIG.releaseFloatDuration / totalDur) {
                         const p = this.releaseProgress / (VISUAL_SCENE_CONFIG.releaseFloatDuration / totalDur);
                         this.displayY = this.releaseStartY + VISUAL_SCENE_CONFIG.releaseFloatRise * p;
-                    } else {
-                        const p = (this.releaseProgress - VISUAL_SCENE_CONFIG.releaseFloatDuration / totalDur) / (1 - VISUAL_SCENE_CONFIG.releaseFloatDuration / totalDur);
-                        this.displayY = (this.releaseStartY + VISUAL_SCENE_CONFIG.releaseFloatRise) * (1 - p) + (-4.0) * p; // Return to new bottom
                     }
-                    if (this.releaseProgress >= 1) { this.smState = 'IDLE'; this.displayY = -4.0; } // Lock to bottom
+                    // No return to floor — just transition to IDLE at current Y
+                    if (this.releaseProgress >= 1) {
+                        this.smState = 'IDLE';
+                    }
                 }
                 break;
         }
 
-        // Apply smoothing to radius, opacity, color
         const rSpeed = VISUAL_SCENE_CONFIG.innerRing.radiusSmoothing;
         const oSpeed = VISUAL_SCENE_CONFIG.innerRing.opacitySmoothing;
         this.ringState.innerRadius = this.smoothToward(this.ringState.innerRadius, targetInnerRadius, rSpeed, dt);
@@ -799,7 +818,7 @@ class AxisSystem {
                 uniform vec3 uCore; uniform vec3 uHalo; uniform float uOpacity;
                 void main(){
                     float r = length(vPos.xz);
-                    float yFade = smoothstep(5.0, 1.0, abs(vPos.y)); // Scaled fade to match massive height
+                    float yFade = smoothstep(5.0, 1.0, abs(vPos.y));
                     float core = exp(-pow(r * 36.0, 2.0));
                     float halo = exp(-pow(r * 12.5, 2.0));
                     float alpha = (core * 0.45 + halo * 0.16) * yFade * uOpacity;
@@ -808,7 +827,7 @@ class AxisSystem {
                 }
             `
         });
-        const axisMesh = new THREE.Mesh(new THREE.CylinderGeometry(0.01, 0.008, 12.0, 20, 1, true), axisMat); // Massive cylinder height
+        const axisMesh = new THREE.Mesh(new THREE.CylinderGeometry(0.01, 0.008, 12.0, 20, 1, true), axisMat);
         axisMesh.position.y = 0.05;
         this.group.add(axisMesh);
     }
@@ -830,7 +849,6 @@ class CameraSystem {
     update() {}
 }
 
-// --- Main Engine ---
 class VisualizerEngine {
     constructor(canvasId, audioManager) {
         this.audio = audioManager;
