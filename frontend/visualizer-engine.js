@@ -88,14 +88,42 @@ const VISUAL_SCENE_CONFIG = {
     ringReactivationMinPitchConf: 0.14,
     ringReactivationMinLoudness: 0.03,
 
+    // --- HOVER state: ring lingers at last pitch position after voice stops ---
+    // After voice loss the ring holds at the last tracked Y for hoverDuration
+    // seconds, fading to hoverVisibility, before transitioning to RELEASE_FLOAT.
+    ringHoverDuration: 2.2,
+    ringHoverVisibility: 0.28,
+    ringHoverRadius: 0.88,
+
+    // --- Ghost echo ring: faint marker at held position during hover ---
+    ghostRingEnabled: true,
+    ghostRingFadeSpeed: 1.1,
+
+    // --- RELEASE_FLOAT: ring stays near last-note Y, drifting gently upward,
+    // then slowly sinking back to idle over releaseTotalDuration seconds.
+    // No hard bottom-drop — the note "evaporates" from where it was sung.
+    releaseFloatRise: 0.18,        // how far up the ring drifts during fade-out
+    releaseFloatDuration: 1.6,     // seconds to float and fade before returning to idle
+    releaseReturnDuration: 2.4,    // seconds to drift back from last-note Y to idle Y
+
+    // --- Echo burst on voice loss: up to N expanding ghost rings ---
+    echoEnabled: true,
+    echoCount: 3,
+    echoSpawnRadius: [0.9, 1.15, 1.45],  // relative to hover radius
+    echoFadeSpeeds: [1.8, 2.4, 3.2],
+    echoExpandSpeeds: [0.22, 0.16, 0.10],
+
     // --- Idle (BottomIdle) persistent visual state ---
     // The ring is ALWAYS visible at the bottom. These values describe
     // its appearance when no voice is present. Release animates TOWARD
     // these values, not toward zero.
-    ringIdleVisibility: 0.38,
-    ringIdleRadius: 0.85,
+    ringIdleVisibility: 0.32,
+    ringIdleRadius: 0.82,
     ringIdleCoreIntensity: 0.0,
-    ringIdleHaloIntensity: 0.12
+    ringIdleHaloIntensity: 0.10,
+    // Idle breathing: subtle radius oscillation while waiting
+    ringIdleBreathAmp: 0.055,
+    ringIdleBreathSpeed: 0.48
 };
 
 class BackgroundSystem {
@@ -346,7 +374,7 @@ class LiveRingSystem {
             radiusEmphasis: 0,
             color: new THREE.Color(0xffa338)
         };
-        // Strict 4-state machine: IDLE | ATTACK_FROM_BOTTOM | TRACKING | RELEASE_FALL
+        // 5-state machine: IDLE | ATTACK_FROM_BOTTOM | TRACKING | HOVER | RELEASE_FALL
         this.smState = 'IDLE';
         this.attackProgress = 0;
         this.attackStartY = VISUAL_SCENE_CONFIG.ringEntrySpawnY;
@@ -359,6 +387,25 @@ class LiveRingSystem {
         this.releaseStartHaloIntensity = 0;
         this.releaseStartThicknessEmphasis = 0;
         this.releaseStartRadiusEmphasis = 0;
+        // HOVER state
+        this.hoverProgress = 0;
+        this.hoverY = VISUAL_SCENE_CONFIG.ringEntrySpawnY;
+        this.hoverStartVisibility = 0;
+        this.hoverStartRadius = 1.0;
+        // Ghost echo ring
+        this.ghostY = VISUAL_SCENE_CONFIG.ringEntrySpawnY;
+        this.ghostOpacity = 0;
+        this.ghostRadius = 1.0;
+        this.ghostColor = new THREE.Color(0xffa338);
+        // Echo burst rings spawned on voice loss
+        this.echoRings = [];  // [{y, radius, opacity, expandSpeed, fadeSpeed, color}]
+        // Memory Y: where the ring last was — used for float release
+        this.memoryY = VISUAL_SCENE_CONFIG.ringEntrySpawnY;
+        this.memoryStartY = VISUAL_SCENE_CONFIG.ringEntrySpawnY;
+        this.releaseFloatProgress = 0;
+        this.releaseReturnProgress = 0;
+        this.releaseFloatStartY = 0;
+        this.releaseFloatStartVisibility = 0;
         this.displayY = VISUAL_SCENE_CONFIG.ringEntrySpawnY;
         // Pitch filter: 3-layer pipeline between raw detector and rendered position.
         // Layer 1 (_filterPitchY): outlier rejection, hysteresis, fast EMA → filteredY
@@ -381,6 +428,121 @@ class LiveRingSystem {
         };
         this.applyDebugMotionScale(motion);
         this.group.add(this.createRing(baseDefinition, motion));
+        this._createGhostRing(baseDefinition);
+        this._createEchoRingPool(baseDefinition);
+    }
+
+    _createGhostRing(def) {
+        const ghostGroup = new THREE.Group();
+        ghostGroup.position.set(0, def.y, def.z);
+
+        const ghostColor = new THREE.Color(def.color);
+        const haloSigma = def.sigma * 7.5;
+        const extent = def.r + haloSigma * 4.0 + this.liveRingCarrierSafetyMargin + 0.3;
+
+        this.ghostMat = new THREE.ShaderMaterial({
+            transparent: true,
+            depthWrite: false,
+            depthTest: true,
+            blending: THREE.AdditiveBlending,
+            side: THREE.DoubleSide,
+            uniforms: {
+                uBaseColor:   { value: ghostColor.clone() },
+                uRadius:      { value: def.r },
+                uSigma:       { value: def.sigma * 2.2 },
+                uOpacity:     { value: 0 },
+                uTime:        { value: 0 },
+            },
+            vertexShader: `
+                varying vec2 vLocal;
+                void main() {
+                    vLocal = position.xy;
+                    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+                }
+            `,
+            fragmentShader: `
+                varying vec2 vLocal;
+                uniform vec3  uBaseColor;
+                uniform float uRadius;
+                uniform float uSigma;
+                uniform float uOpacity;
+                uniform float uTime;
+                void main() {
+                    float d = length(vLocal);
+                    float dist = abs(d - uRadius);
+                    float profile = exp(-(dist * dist) / (2.0 * uSigma * uSigma));
+                    if (profile < 0.003) discard;
+                    float pulse = 0.85 + 0.15 * sin(uTime * 1.8);
+                    gl_FragColor = vec4(uBaseColor * 0.6 * pulse, profile * uOpacity);
+                }
+            `
+        });
+
+        const ghostMesh = new THREE.Mesh(
+            new THREE.PlaneGeometry(extent * 2.0, extent * 2.0, 1, 1),
+            this.ghostMat
+        );
+        ghostMesh.rotation.x = -Math.PI / 2;
+        ghostGroup.add(ghostMesh);
+        this.ghostGroup = ghostGroup;
+        this.group.add(ghostGroup);
+    }
+
+    _createEchoRingPool(def) {
+        const C = VISUAL_SCENE_CONFIG;
+        if (!C.echoEnabled) return;
+        this.echoMeshGroups = [];
+        this.echoMats = [];
+        const haloSigma = def.sigma * 7.5;
+        const extent = def.r + haloSigma * 4.0 + this.liveRingCarrierSafetyMargin + 0.5;
+        for (let i = 0; i < C.echoCount; i++) {
+            const mat = new THREE.ShaderMaterial({
+                transparent: true,
+                depthWrite: false,
+                depthTest: true,
+                blending: THREE.AdditiveBlending,
+                side: THREE.DoubleSide,
+                uniforms: {
+                    uBaseColor: { value: new THREE.Color(0xffa338) },
+                    uRadius:    { value: def.r * 1.1 },
+                    uSigma:     { value: def.sigma * 3.0 },
+                    uOpacity:   { value: 0 },
+                    uTime:      { value: 0 },
+                },
+                vertexShader: `
+                    varying vec2 vLocal;
+                    void main() {
+                        vLocal = position.xy;
+                        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+                    }
+                `,
+                fragmentShader: `
+                    varying vec2 vLocal;
+                    uniform vec3  uBaseColor;
+                    uniform float uRadius;
+                    uniform float uSigma;
+                    uniform float uOpacity;
+                    uniform float uTime;
+                    void main() {
+                        float d = length(vLocal);
+                        float dist = abs(d - uRadius);
+                        float profile = exp(-(dist * dist) / (2.0 * uSigma * uSigma));
+                        if (profile < 0.003) discard;
+                        // Outer glow only — no inner fill
+                        float outerOnly = (d >= uRadius) ? 1.0 : 0.55;
+                        gl_FragColor = vec4(uBaseColor * 0.75, profile * uOpacity * outerOnly);
+                    }
+                `
+            });
+            const mesh = new THREE.Mesh(new THREE.PlaneGeometry(extent * 2.0, extent * 2.0), mat);
+            mesh.rotation.x = -Math.PI / 2;
+            const grp = new THREE.Group();
+            grp.add(mesh);
+            grp.visible = false;
+            this.group.add(grp);
+            this.echoMeshGroups.push(grp);
+            this.echoMats.push(mat);
+        }
     }
 
     applyDebugMotionScale(motion) {
@@ -716,6 +878,7 @@ class LiveRingSystem {
         const state = liveState || {};
         const voiced = Boolean(state.active);
         const spawnY = VISUAL_SCENE_CONFIG.ringEntrySpawnY;
+        this._elapsed = elapsed; // store for IDLE breathing
 
         // ================================================================
         // STATE TRANSITIONS — voice presence drives all transitions.
@@ -731,32 +894,37 @@ class LiveRingSystem {
                 // This is not a "nothing is happening" state — the ring is
                 // always visually present at the bottom.
                 // -------------------------------------------------------
-                this.ringState.visibility       = VISUAL_SCENE_CONFIG.ringIdleVisibility;
-                this.ringState.radius           = VISUAL_SCENE_CONFIG.ringIdleRadius;
-                this.ringState.coreIntensity    = VISUAL_SCENE_CONFIG.ringIdleCoreIntensity;
-                this.ringState.haloIntensity    = VISUAL_SCENE_CONFIG.ringIdleHaloIntensity;
-                this.ringState.thicknessEmphasis = 0;
-                this.ringState.radiusEmphasis   = 0;
-                this.displayY = spawnY;
-
-                if (voiced) {
-                    // → ATTACK_FROM_BOTTOM: rise from bottom toward the REAL note
-                    this.smState = 'ATTACK_FROM_BOTTOM';
-                    this.attackProgress = 0;
-                    this.attackStartY = spawnY;
-                    this.pitchFilter.seeded = false;  // force fresh seed
-                    this.pitchFilter.outlierFrames = 0;
-                    const seedY = this._filterPitchY(state.y ?? 0, dt);
-                    this.attackTargetY = seedY;
-                    // Seed targetY so Layer 2 doesn't start from a stale position
-                    this.pitchFilter.targetY = seedY;
+                {
+                    const breathPhase = (this._elapsed || 0) * VISUAL_SCENE_CONFIG.ringIdleBreathSpeed;
+                    const breath = Math.sin(breathPhase) * VISUAL_SCENE_CONFIG.ringIdleBreathAmp;
+                    this.ringState.visibility       = VISUAL_SCENE_CONFIG.ringIdleVisibility;
+                    this.ringState.radius           = VISUAL_SCENE_CONFIG.ringIdleRadius * (1 + breath);
+                    this.ringState.coreIntensity    = VISUAL_SCENE_CONFIG.ringIdleCoreIntensity;
+                    this.ringState.haloIntensity    = VISUAL_SCENE_CONFIG.ringIdleHaloIntensity + Math.max(0, breath * 0.5);
+                    this.ringState.thicknessEmphasis = 0;
+                    this.ringState.radiusEmphasis   = 0;
                     this.displayY = spawnY;
+
+                    if (voiced) {
+                        // → ATTACK_FROM_BOTTOM: rise from bottom toward the REAL note
+                        this.smState = 'ATTACK_FROM_BOTTOM';
+                        this.attackProgress = 0;
+                        this.attackStartY = spawnY;
+                        this.pitchFilter.seeded = false;  // force fresh seed
+                        this.pitchFilter.outlierFrames = 0;
+                        const seedY = this._filterPitchY(state.y ?? 0, dt);
+                        this.attackTargetY = seedY;
+                        // Seed targetY so Layer 2 doesn't start from a stale position
+                        this.pitchFilter.targetY = seedY;
+                        this.displayY = spawnY;
+                    }
                 }
                 break;
 
             case 'ATTACK_FROM_BOTTOM':
                 if (!voiced) {
-                    // Voice lost during rise → immediately fall
+                    // Voice lost during rise → set hoverY to current position and fall
+                    this.hoverY = this.displayY;
                     this._enterRelease();
                 } else {
                     // Filter the raw pitch — prevents target chatter during rise
@@ -776,8 +944,8 @@ class LiveRingSystem {
 
             case 'TRACKING':
                 if (!voiced) {
-                    // Voice ended → immediately release, no linger
-                    this._enterRelease();
+                    // Voice ended → enter HOVER: hold at current position briefly
+                    this._enterHover();
                 } else {
                     const C = VISUAL_SCENE_CONFIG;
                     // --- Layer 1: pitch filter (outlier rejection + hysteresis + EMA) ---
@@ -803,12 +971,52 @@ class LiveRingSystem {
                     const maxStep = C.ringYMaxSpeed * dt;
                     const rawStep = desired - this.displayY;
                     this.displayY += MathUtils.clamp(rawStep, -maxStep, maxStep);
+                    // Track last valid Y so HOVER can anchor here
+                    this.hoverY = this.displayY;
+                }
+                break;
+
+            case 'HOVER':
+                // -------------------------------------------------------
+                // State: HOVER — ring lingers at last note Y, fading
+                // -------------------------------------------------------
+                if (voiced) {
+                    // Voice returned during hover → restart tracking from here
+                    this.smState = 'ATTACK_FROM_BOTTOM';
+                    this.attackProgress = 0;
+                    this.attackStartY = this.displayY;
+                    this.pitchFilter.seeded = false;
+                    this.pitchFilter.outlierFrames = 0;
+                    const seedY = this._filterPitchY(state.y ?? 0, dt);
+                    this.attackTargetY = seedY;
+                    this.pitchFilter.targetY = seedY;
+                    this.ghostOpacity = 0;
+                    this.echoRings = [];
+                } else {
+                    const hoverDuration = Math.max(0.2, VISUAL_SCENE_CONFIG.ringHoverDuration);
+                    this.hoverProgress = Math.min(1, this.hoverProgress + dt / hoverDuration);
+                    const eased = this.hoverProgress;
+                    // Hold Y position exactly — no movement
+                    this.displayY = this.hoverY;
+                    // Fade visibility toward hover target
+                    this.ringState.visibility = MathUtils.lerp(
+                        this.hoverStartVisibility, VISUAL_SCENE_CONFIG.ringHoverVisibility, eased);
+                    this.ringState.radius = MathUtils.lerp(
+                        this.hoverStartRadius, VISUAL_SCENE_CONFIG.ringHoverRadius, eased * 0.5);
+                    this.ringState.coreIntensity = MathUtils.lerp(this.releaseStartCoreIntensity, 0, eased);
+                    this.ringState.haloIntensity = MathUtils.lerp(this.releaseStartHaloIntensity, 0, eased);
+                    this.ringState.thicknessEmphasis = MathUtils.lerp(this.releaseStartThicknessEmphasis, 0, eased);
+                    this.ringState.radiusEmphasis = MathUtils.lerp(this.releaseStartRadiusEmphasis, 0, eased);
+
+                    if (this.hoverProgress >= 1) {
+                        this._enterRelease();
+                    }
                 }
                 break;
 
             case 'RELEASE_FALL':
                 if (voiced) {
-                    // New voice during fall → fresh attack from current position
+                    // New voice during release → fresh attack from current position
                     this.smState = 'ATTACK_FROM_BOTTOM';
                     this.attackProgress = 0;
                     this.attackStartY = this.displayY;
@@ -818,40 +1026,66 @@ class LiveRingSystem {
                     this.attackTargetY = seedY;
                     // Seed targetY so Layer 2 has a clean starting point
                     this.pitchFilter.targetY = seedY;
+                    this.ghostOpacity = 0;
+                    this.echoRings = [];
                 } else {
                     // -------------------------------------------------------
-                    // State D: ReleaseToBottom
-                    // Lerp TOWARD idle values (not toward 0).
-                    // The bottom is the destination, not invisibility.
-                    // Motion is strictly downward; no upward component possible
-                    // because releaseStartY >= spawnY and we lerp toward spawnY.
+                    // State D: RELEASE_FLOAT (two phases)
+                    //
+                    // Phase 1 (releaseFloatDuration): ring stays near last-note Y,
+                    //   drifts gently upward by releaseFloatRise, fades to near 0.
+                    // Phase 2 (releaseReturnDuration): ring drifts from float
+                    //   endpoint back to spawnY while fading in to idle visibility.
+                    // This eliminates the jarring bottom-drop.
                     // -------------------------------------------------------
-                    const exitDuration = Math.max(0.08, VISUAL_SCENE_CONFIG.ringExitDurationSeconds);
-                    this.releaseProgress = Math.min(1, this.releaseProgress + dt / exitDuration);
-                    const eased = 1 - Math.pow(1 - this.releaseProgress, 2);
-                    this.displayY = MathUtils.lerp(this.releaseStartY, spawnY, eased);
-                    // Radius returns to idle size, not a scaled-down version of active
-                    this.ringState.radius = MathUtils.lerp(this.releaseStartRadius, VISUAL_SCENE_CONFIG.ringIdleRadius, eased);
-                    // Visibility fades BACK TO the idle base level — never to zero
-                    this.ringState.visibility = MathUtils.lerp(this.releaseStartVisibility, VISUAL_SCENE_CONFIG.ringIdleVisibility, eased);
-                    // Active intensities fall to their idle equivalents
-                    this.ringState.coreIntensity = MathUtils.lerp(this.releaseStartCoreIntensity, VISUAL_SCENE_CONFIG.ringIdleCoreIntensity, eased);
-                    this.ringState.haloIntensity = MathUtils.lerp(this.releaseStartHaloIntensity, VISUAL_SCENE_CONFIG.ringIdleHaloIntensity, eased);
-                    this.ringState.thicknessEmphasis = MathUtils.lerp(this.releaseStartThicknessEmphasis, 0, eased);
-                    this.ringState.radiusEmphasis = MathUtils.lerp(this.releaseStartRadiusEmphasis, 0, eased);
+                    const C = VISUAL_SCENE_CONFIG;
+                    const floatDur  = Math.max(0.1, C.releaseFloatDuration);
+                    const returnDur = Math.max(0.1, C.releaseReturnDuration);
+                    const totalDur  = floatDur + returnDur;
+                    const totalProg = Math.min(1, this.releaseProgress + dt / totalDur);
+                    this.releaseProgress = totalProg;
+
+                    if (totalProg <= floatDur / totalDur) {
+                        // --- Phase 1: float at last-note Y, drift up, fade out ---
+                        const p = MathUtils.clamp(totalProg / (floatDur / totalDur), 0, 1);
+                        const eased = 1 - Math.pow(1 - p, 2);
+                        this.displayY = this.releaseStartY + C.releaseFloatRise * eased;
+                        this.ringState.visibility = MathUtils.lerp(
+                            this.releaseStartVisibility, 0.04, eased);
+                        this.ringState.radius = MathUtils.lerp(
+                            this.releaseStartRadius, C.ringIdleRadius * 0.92, eased);
+                        this.ringState.coreIntensity = MathUtils.lerp(
+                            this.releaseStartCoreIntensity, 0, eased);
+                        this.ringState.haloIntensity = MathUtils.lerp(
+                            this.releaseStartHaloIntensity, 0, eased);
+                        this.ringState.thicknessEmphasis = MathUtils.lerp(
+                            this.releaseStartThicknessEmphasis, 0, eased);
+                        this.ringState.radiusEmphasis = MathUtils.lerp(
+                            this.releaseStartRadiusEmphasis, 0, eased);
+                    } else {
+                        // --- Phase 2: drift back to idle Y, fade to idle visibility ---
+                        const p2Start = floatDur / totalDur;
+                        const p = MathUtils.clamp((totalProg - p2Start) / (1 - p2Start), 0, 1);
+                        const eased = p < 0.5
+                            ? 2 * p * p
+                            : 1 - Math.pow(-2 * p + 2, 2) / 2; // ease-in-out quad
+                        const floatTopY = this.releaseStartY + C.releaseFloatRise;
+                        this.displayY = MathUtils.lerp(floatTopY, spawnY, eased);
+                        this.ringState.visibility = MathUtils.lerp(0.04, C.ringIdleVisibility, eased);
+                        this.ringState.radius = MathUtils.lerp(C.ringIdleRadius * 0.92, C.ringIdleRadius, eased);
+                        this.ringState.coreIntensity    = C.ringIdleCoreIntensity;
+                        this.ringState.haloIntensity    = C.ringIdleHaloIntensity * (0.5 + 0.5 * eased);
+                        this.ringState.thicknessEmphasis = 0;
+                        this.ringState.radiusEmphasis    = 0;
+                    }
+
                     if (this.releaseProgress >= 1) {
-                        // -------------------------------------------------------
-                        // State E: BackToBottomIdle
-                        // Snap to IDLE. Set idle values explicitly here; the IDLE
-                        // case will also enforce them every frame going forward.
-                        // Under NO circumstances set visibility to 0 here.
-                        // -------------------------------------------------------
                         this.smState = 'IDLE';
                         this.displayY = spawnY;
-                        this.ringState.visibility       = VISUAL_SCENE_CONFIG.ringIdleVisibility;
-                        this.ringState.radius           = VISUAL_SCENE_CONFIG.ringIdleRadius;
-                        this.ringState.coreIntensity    = VISUAL_SCENE_CONFIG.ringIdleCoreIntensity;
-                        this.ringState.haloIntensity    = VISUAL_SCENE_CONFIG.ringIdleHaloIntensity;
+                        this.ringState.visibility       = C.ringIdleVisibility;
+                        this.ringState.radius           = C.ringIdleRadius;
+                        this.ringState.coreIntensity    = C.ringIdleCoreIntensity;
+                        this.ringState.haloIntensity    = C.ringIdleHaloIntensity;
                         this.ringState.thicknessEmphasis = 0;
                         this.ringState.radiusEmphasis   = 0;
                     }
@@ -863,7 +1097,7 @@ class LiveRingSystem {
         // SMOOTH VISUAL PROPERTIES (only when NOT in release — release
         // drives its own interpolation above)
         // ================================================================
-        if (this.smState !== 'RELEASE_FALL' && this.smState !== 'IDLE') {
+        if (this.smState !== 'RELEASE_FALL' && this.smState !== 'IDLE' && this.smState !== 'HOVER') {
             this.targetState.radius = state.radius ?? this.targetState.radius;
             this.targetState.visibility = state.visibility ?? this.targetState.visibility;
             this.targetState.coreIntensity = state.coreIntensity ?? this.targetState.coreIntensity;
@@ -892,22 +1126,63 @@ class LiveRingSystem {
         }
     }
 
+    _enterHover() {
+        this.smState = 'HOVER';
+        this.hoverProgress = 0;
+        // hoverY was updated every TRACKING frame — it holds the last note position
+        this.displayY = this.hoverY;
+        this.hoverStartVisibility = this.ringState.visibility;
+        this.hoverStartRadius = this.ringState.radius;
+        // Snapshot release-start values for intensity interpolation
+        this.releaseStartCoreIntensity = this.ringState.coreIntensity;
+        this.releaseStartHaloIntensity = this.ringState.haloIntensity;
+        this.releaseStartThicknessEmphasis = this.ringState.thicknessEmphasis;
+        this.releaseStartRadiusEmphasis = this.ringState.radiusEmphasis;
+        // Freeze pitch filter — next onset seeds fresh
+        this.pitchFilter.seeded = false;
+        this.pitchFilter.outlierFrames = 0;
+        // Spawn ghost at this position
+        this.ghostY = this.hoverY;
+        this.ghostOpacity = 0.55;
+        this.ghostRadius = this.ringState.radius;
+        this.ghostColor.copy(this.ringState.color);
+    }
+
     _enterRelease() {
         this.smState = 'RELEASE_FALL';
         this.releaseProgress = 0;
-        this.releaseStartY = this.displayY;
+        // Start float from the hover hold position
+        this.releaseStartY = this.hoverY;
+        this.displayY = this.hoverY;
         this.releaseStartRadius = this.ringState.radius;
         this.releaseStartVisibility = this.ringState.visibility;
         this.releaseStartCoreIntensity = this.ringState.coreIntensity;
         this.releaseStartHaloIntensity = this.ringState.haloIntensity;
         this.releaseStartThicknessEmphasis = this.ringState.thicknessEmphasis;
         this.releaseStartRadiusEmphasis = this.ringState.radiusEmphasis;
+        // Spawn echo burst rings at hover position
+        this._spawnEchoBurst();
         // Reset pitch filter completely — next onset must seed fresh.
-        // targetY is reset to spawnY so Layer 2 doesn't carry stale pitch
-        // into the next attack.
         this.pitchFilter.seeded = false;
         this.pitchFilter.outlierFrames = 0;
         this.pitchFilter.targetY = VISUAL_SCENE_CONFIG.ringEntrySpawnY;
+    }
+
+    _spawnEchoBurst() {
+        if (!VISUAL_SCENE_CONFIG.echoEnabled) return;
+        const C = VISUAL_SCENE_CONFIG;
+        this.echoRings = [];
+        const baseRadius = this.ringState.radius;
+        for (let i = 0; i < C.echoCount; i++) {
+            this.echoRings.push({
+                y: this.hoverY,
+                radius: baseRadius * (C.echoSpawnRadius[i] ?? (0.9 + i * 0.25)),
+                opacity: 0.28 - i * 0.07,
+                expandSpeed: C.echoExpandSpeeds[i] ?? 0.15,
+                fadeSpeed: C.echoFadeSpeeds[i] ?? 2.0,
+                color: this.ringState.color.clone()
+            });
+        }
     }
 
     update(timeSeconds = 0, liveState = null, dt = 1 / 60) {
@@ -941,6 +1216,40 @@ class LiveRingSystem {
         this.haloMat.uniforms.uHaloSigma.value = safeHaloSigma;
         this.coreMat.uniforms.uRadius.value = safeRadius * radiusCoreFactor;
         this.haloMat.uniforms.uRadius.value = safeRadius * radiusHaloFactor;
+
+        // --- Ghost ring: fade out over time, stays at hoverY ---
+        if (VISUAL_SCENE_CONFIG.ghostRingEnabled && this.ghostGroup) {
+            const fadeSpeed = VISUAL_SCENE_CONFIG.ghostRingFadeSpeed;
+            this.ghostOpacity = Math.max(0, this.ghostOpacity - dt * fadeSpeed *
+                (this.smState === 'HOVER' ? 0.15 : 1.0));
+            this.ghostGroup.position.y = this.ghostY;
+            this.ghostMat.uniforms.uOpacity.value = this.ghostOpacity;
+            this.ghostMat.uniforms.uBaseColor.value.copy(this.ghostColor);
+            this.ghostMat.uniforms.uRadius.value = this.base.radius * this.ghostRadius;
+            this.ghostMat.uniforms.uTime.value = timeSeconds;
+            this.ghostGroup.visible = this.ghostOpacity > 0.005;
+        }
+
+        // --- Echo burst rings: expand outward and fade ---
+        if (VISUAL_SCENE_CONFIG.echoEnabled && this.echoMeshGroups) {
+            for (let i = 0; i < this.echoMeshGroups.length; i++) {
+                const grp = this.echoMeshGroups[i];
+                const mat = this.echoMats[i];
+                const echo = this.echoRings[i];
+                if (!echo || echo.opacity <= 0.002) {
+                    grp.visible = false;
+                    continue;
+                }
+                echo.radius += echo.expandSpeed * dt;
+                echo.opacity = Math.max(0, echo.opacity - echo.fadeSpeed * dt);
+                grp.position.y = echo.y;
+                grp.visible = true;
+                mat.uniforms.uRadius.value = this.base.radius * echo.radius;
+                mat.uniforms.uOpacity.value = echo.opacity;
+                mat.uniforms.uBaseColor.value.copy(echo.color);
+                mat.uniforms.uTime.value = timeSeconds;
+            }
+        }
     }
 
     colorForPitchNorm(pitchNorm) {

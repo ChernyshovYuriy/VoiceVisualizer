@@ -24,76 +24,147 @@
         #status-badge {
             position:absolute; bottom:22px; left:20px;
             display:flex; align-items:center; gap:7px;
-            padding:7px 14px 7px 10px;
-            background:rgba(4,12,26,0.80); border:1px solid rgba(40,80,130,0.22);
+            padding:6px 13px 6px 9px;
+            background:rgba(4,12,26,0.75);
+            border:1px solid rgba(40,80,130,0.18);
             border-radius:999px;
-            backdrop-filter:blur(20px) saturate(130%);
-            -webkit-backdrop-filter:blur(20px) saturate(130%);
-            transition:border-color .4s;
+            backdrop-filter:blur(20px) saturate(140%);
+            -webkit-backdrop-filter:blur(20px) saturate(140%);
+            transition:border-color .5s;
         }
-        #status-badge.live  { border-color:rgba(34,197,94,.32); }
-        #status-badge.error { border-color:rgba(239,68,68,.32); }
-        .status-dot { width:7px; height:7px; border-radius:50%; background:#f59e0b;
-            flex-shrink:0; transition:background .4s, box-shadow .4s; }
-        .status-dot.live  { background:#22c55e; box-shadow:0 0 8px rgba(34,197,94,.7); }
-        .status-dot.error { background:#ef4444; box-shadow:0 0 8px rgba(239,68,68,.7); }
-        #status-text { font-size:10px; font-weight:700; letter-spacing:.9px; text-transform:uppercase;
-            color:rgba(120,160,200,.45); transition:color .4s; }
-        #status-badge.live  #status-text { color:rgba(134,239,172,.65); }
-        #status-badge.error #status-text { color:rgba(252,165,165,.65); }
+        #status-badge.live  { border-color:rgba(34,197,94,.28); }
+        #status-badge.error { border-color:rgba(239,68,68,.28); }
+        .status-dot { width:6px; height:6px; border-radius:50%; background:#f59e0b;
+            flex-shrink:0; transition:background .5s, box-shadow .5s; }
+        .status-dot.live  { background:#22c55e; box-shadow:0 0 7px rgba(34,197,94,.7); }
+        .status-dot.error { background:#ef4444; box-shadow:0 0 7px rgba(239,68,68,.7); }
+        #status-text { font-size:9.5px; font-weight:700; letter-spacing:1px; text-transform:uppercase;
+            color:rgba(120,160,200,.40); transition:color .5s; }
+        #status-badge.live  #status-text { color:rgba(134,239,172,.60); }
+        #status-badge.error #status-text { color:rgba(252,165,165,.60); }
 
-        /* compact floating analysis card */
+        /* info panel */
         #info-panel {
-            position:absolute; top:26px; right:26px; width:250px;
-            background:linear-gradient(175deg, rgba(16,20,30,.56), rgba(8,10,15,.70));
-            border:1px solid rgba(255,255,255,.10);
-            border-radius:14px;
-            backdrop-filter:blur(24px) saturate(130%);
-            -webkit-backdrop-filter:blur(24px) saturate(130%);
-            box-shadow:0 20px 44px rgba(0,0,0,.45), inset 0 1px 0 rgba(255,255,255,.08);
-            padding:12px 12px 10px;
-            display:flex; flex-direction:column; gap:8px;
+            position:absolute; top:24px; right:24px; width:228px;
+            background:rgba(8,11,18,0.72);
+            border:1px solid rgba(255,255,255,.08);
+            border-radius:16px;
+            backdrop-filter:blur(28px) saturate(140%);
+            -webkit-backdrop-filter:blur(28px) saturate(140%);
+            box-shadow:0 24px 48px rgba(0,0,0,.5), inset 0 1px 0 rgba(255,255,255,.06);
+            padding:14px 14px 12px;
+            display:flex; flex-direction:column; gap:0;
+            overflow:hidden;
         }
-        .p-header { padding:2px 2px 8px; border-bottom:1px solid rgba(255,255,255,.09);
-            display:flex; align-items:center; justify-content:space-between; }
-        .p-header-label { font-size:9px; font-weight:700; letter-spacing:1.1px;
-            text-transform:uppercase; color:rgba(216,224,240,.58); }
+
+        /* thin accent line at top of panel */
+        #info-panel::before {
+            content:''; display:block;
+            height:1px; width:100%;
+            margin:-14px -14px 14px;
+            width:calc(100% + 28px);
+            background:linear-gradient(90deg,
+                transparent 0%, rgba(255,200,100,.18) 30%, rgba(100,180,255,.14) 70%, transparent 100%);
+            transition:background 0.6s;
+        }
+
+        .p-header {
+            padding:0 0 10px;
+            border-bottom:1px solid rgba(255,255,255,.07);
+            display:flex; align-items:center; justify-content:space-between;
+        }
+        .p-header-label { font-size:8.5px; font-weight:700; letter-spacing:1.2px;
+            text-transform:uppercase; color:rgba(200,210,230,.38); }
         .p-live-dot { width:5px; height:5px; border-radius:50%;
-            background:rgba(245,158,11,.72); box-shadow:0 0 8px rgba(245,158,11,.55); }
+            background:rgba(245,158,11,.65); box-shadow:0 0 7px rgba(245,158,11,.45);
+            transition:background .4s, box-shadow .4s; }
+        .p-live-dot.active {
+            background:rgba(74,222,128,.72); box-shadow:0 0 7px rgba(74,222,128,.5);
+        }
 
-        .note-section { padding:4px 2px 2px; display:flex; align-items:center; gap:12px; }
-        .note-ring { width:58px; height:58px; border-radius:50%;
-            border:1px solid rgba(255,255,255,.16);
+        /* note display */
+        .note-section {
+            padding:12px 0 11px;
+            display:flex; align-items:center; gap:14px;
+            border-bottom:1px solid rgba(255,255,255,.07);
+        }
+        .note-ring {
+            width:54px; height:54px; border-radius:50%; flex-shrink:0;
+            border:1px solid rgba(255,255,255,.12);
             display:flex; align-items:center; justify-content:center;
-            transition:border-color .3s, box-shadow .3s; }
-        .note-ring.voiced { border-color:rgba(255,204,122,.56);
-            box-shadow:0 0 22px rgba(255,188,106,.20), inset 0 0 12px rgba(255,188,106,.08); }
-        #v-note { font-size:22px; font-weight:700; letter-spacing:-.6px; line-height:1;
-            color:rgba(232,238,255,.48); transition:color .2s, text-shadow .2s; }
-        #v-note.voiced { color:#fff4df; text-shadow:0 0 16px rgba(255,188,106,.28); }
+            transition:border-color .4s, box-shadow .4s, background .4s;
+            position:relative;
+        }
+        .note-ring::after {
+            content:''; position:absolute; inset:0; border-radius:50%;
+            background:radial-gradient(circle at center, rgba(255,188,100,.06) 0%, transparent 70%);
+            opacity:0; transition:opacity .4s;
+        }
+        .note-ring.voiced {
+            border-color:rgba(255,200,100,.48);
+            box-shadow:0 0 18px rgba(255,180,90,.16), 0 0 40px rgba(255,160,60,.06);
+        }
+        .note-ring.voiced::after { opacity:1; }
+        #v-note {
+            font-size:20px; font-weight:700; letter-spacing:-.5px; line-height:1;
+            color:rgba(220,228,248,.36); transition:color .25s, text-shadow .25s;
+            position:relative; z-index:1;
+        }
+        #v-note.voiced { color:#fff8e8; text-shadow:0 0 20px rgba(255,190,90,.3); }
+        .note-meta { display:flex; flex-direction:column; gap:3px; }
         #note-sub { font-size:9px; font-weight:600; letter-spacing:.7px;
-            text-transform:uppercase; color:rgba(206,214,232,.52); }
+            text-transform:uppercase; color:rgba(200,210,230,.38);
+            transition:color .3s; }
+        #note-sub.voiced { color:rgba(255,200,120,.55); }
+        #note-name-display {
+            font-size:11px; font-weight:500; letter-spacing:.2px;
+            color:rgba(220,228,248,.22); transition:color .3s;
+            min-height:16px;
+        }
+        #note-name-display.voiced { color:rgba(220,228,248,.58); }
 
-        .metrics { padding:2px; display:flex; flex-direction:column; gap:4px; }
-        .metric { padding:5px 0; border-bottom:1px solid rgba(255,255,255,.08);
-            display:flex; align-items:center; justify-content:space-between; gap:8px; }
-        .metric:last-child { border-bottom:none; }
+        /* metrics */
+        .metrics { padding:10px 0 0; display:flex; flex-direction:column; gap:0; }
+        .metric {
+            padding:7px 0;
+            border-bottom:1px solid rgba(255,255,255,.06);
+            display:flex; align-items:center; justify-content:space-between; gap:8px;
+        }
+        .metric:last-child { border-bottom:none; padding-bottom:0; }
         .m-label { font-size:8px; font-weight:700; letter-spacing:1px;
-            text-transform:uppercase; color:rgba(220,226,240,.42); }
+            text-transform:uppercase; color:rgba(200,210,230,.32); }
         .m-value { font-family:'JetBrains Mono','Fira Code','Consolas',monospace;
-            font-size:12px; font-weight:500; color:rgba(220,228,244,.42); transition:color .2s; }
-        .m-value.lit { color:#fff8e9; }
-        .vu-track { height:3px; border-radius:2px; background:rgba(255,255,255,.12);
-            overflow:hidden; width:86px; margin-left:auto; }
-        #vol-bar { height:100%; width:0%; border-radius:2px; background:#4ade80;
-            transition:width .08s linear, background .25s; }
-        .chip { display:inline-block; padding:3px 10px; border-radius:999px;
-            font-size:10px; font-weight:600; letter-spacing:.15px;
-            border:1px solid rgba(255,255,255,.1); background:rgba(255,255,255,.03);
-            color:rgba(220,228,244,.54); transition:color .2s, background .2s, border-color .2s; }
-        #ax-hint { position:absolute; bottom:22px; left:50%; transform:translateX(-50%);
-            font-size:9px; letter-spacing:.6px; text-transform:uppercase;
-            color:rgba(60,100,150,.28); pointer-events:none; white-space:nowrap; }
+            font-size:11.5px; font-weight:500; color:rgba(210,220,238,.32); transition:color .25s; }
+        .m-value.lit { color:rgba(240,245,255,.82); }
+        .vu-track { height:2px; border-radius:1px; background:rgba(255,255,255,.09);
+            overflow:hidden; width:82px; margin-left:auto; margin-top:4px; }
+        #vol-bar { height:100%; width:0%; border-radius:1px; background:#4ade80;
+            transition:width .07s linear, background .2s; }
+        .chip {
+            display:inline-flex; align-items:center;
+            padding:3px 9px; border-radius:999px;
+            font-size:9.5px; font-weight:600; letter-spacing:.1px;
+            border:1px solid rgba(255,255,255,.08); background:rgba(255,255,255,.03);
+            color:rgba(210,220,238,.40);
+            transition:color .25s, background .25s, border-color .25s, box-shadow .25s;
+        }
+        .chip.lit { box-shadow:0 0 10px rgba(255,255,255,.04); }
+
+        #ax-hint {
+            position:absolute; bottom:22px; left:50%; transform:translateX(-50%);
+            font-size:8.5px; letter-spacing:.7px; text-transform:uppercase;
+            color:rgba(60,100,150,.24); pointer-events:none; white-space:nowrap;
+        }
+
+        /* state label */
+        #state-label {
+            position:absolute; top:24px; left:24px;
+            font-size:8.5px; font-weight:700; letter-spacing:1.1px; text-transform:uppercase;
+            color:rgba(100,150,200,.20); pointer-events:none;
+            transition:color .4s;
+        }
+        #state-label.active { color:rgba(255,200,100,.28); }
+
         #debug-camera-label {
             position: absolute;
             top: 22px;
@@ -116,6 +187,7 @@
 <canvas id="canvas-container"></canvas>
 <div id="ui-layer">
     <div id="debug-camera-label">DEBUG CAMERA ON</div>
+    <div id="state-label">Idle</div>
     <div id="status-badge">
         <div id="status-dot" class="status-dot"></div>
         <span id="status-text">Connecting</span>
@@ -123,15 +195,16 @@
     <div id="ax-hint">Pitch field &middot; Brightness &middot; Energy</div>
     <div id="info-panel">
         <div class="p-header">
-            <span class="p-header-label">Analysis</span>
-            <span class="p-live-dot"></span>
+            <span class="p-header-label">Voice Analysis</span>
+            <span class="p-live-dot" id="p-live-dot"></span>
         </div>
         <div class="note-section">
             <div class="note-ring" id="note-ring">
                 <span id="v-note">—</span>
             </div>
-            <div>
+            <div class="note-meta">
                 <div id="note-sub">No signal</div>
+                <div id="note-name-display">—</div>
             </div>
         </div>
         <div class="metrics">
@@ -151,7 +224,7 @@
                 <span class="chip" id="v-timbre">—</span>
             </div>
             <div class="metric">
-                <div class="m-label">Vocal Range</div>
+                <div class="m-label">Range</div>
                 <span class="chip" id="v-range">—</span>
             </div>
         </div>
@@ -314,30 +387,61 @@
                 freq: document.getElementById('v-freq'),
                 vol: document.getElementById('v-vol'),
                 timbre: document.getElementById('v-timbre'),
-                range: document.getElementById('v-range')
+                range: document.getElementById('v-range'),
+                noteSub: document.getElementById('note-sub'),
+                noteNameDisplay: document.getElementById('note-name-display'),
+                pLiveDot: document.getElementById('p-live-dot'),
+                stateLabel: document.getElementById('state-label'),
             };
+            this._lastNote = null;
+            this._lastState = null;
         }
 
-        update() {
+        update(engineState) {
             const S = this.audio.state;
             const sm = this.audio.smoothed;
             const voiced = S.note && S.note !== '—';
-
             const ring = document.getElementById('note-ring');
-            const sub  = document.getElementById('note-sub');
+
+            // --- Note display ---
             this.els.note.textContent = S.note || '—';
             if (voiced) {
-                this.els.note.classList.add('voiced'); ring.classList.add('voiced');
-                sub.textContent = (S.range && S.range !== '—') ? S.range + ' voice' : 'Voiced';
-                this.els.note.style.textShadow = `0 0 ${14 + sm.pitchConf * 26}px rgba(96,165,250,${(0.16 + this.audio.transientFlash * 0.28).toFixed(2)})`;
+                this.els.note.classList.add('voiced');
+                ring.classList.add('voiced');
+                this.els.noteSub.classList.add('voiced');
+                this.els.noteNameDisplay.classList.add('voiced');
+                this.els.noteSub.textContent = (S.range && S.range !== '—') ? S.range + ' voice' : 'Voiced';
+                this.els.noteNameDisplay.textContent = S.pitch ? S.pitch.toFixed(1) + ' Hz' : '—';
+                this.els.note.style.textShadow = `0 0 ${12 + sm.pitchConf * 22}px rgba(255,180,80,${(0.18 + this.audio.transientFlash * 0.25).toFixed(2)})`;
+                this.els.pLiveDot.classList.add('active');
             } else {
-                this.els.note.classList.remove('voiced'); ring.classList.remove('voiced');
-                sub.textContent = 'No signal'; this.els.note.style.textShadow = 'none';
+                this.els.note.classList.remove('voiced');
+                ring.classList.remove('voiced');
+                this.els.noteSub.classList.remove('voiced');
+                this.els.noteNameDisplay.classList.remove('voiced');
+                this.els.noteSub.textContent = 'No signal';
+                this.els.noteNameDisplay.textContent = '—';
+                this.els.note.style.textShadow = 'none';
+                this.els.pLiveDot.classList.remove('active');
             }
 
+            // --- State label (top-left corner) ---
+            if (engineState && engineState !== this._lastState) {
+                this._lastState = engineState;
+                const stateMap = {
+                    IDLE: 'Idle', ATTACK_FROM_BOTTOM: 'Onset',
+                    TRACKING: 'Tracking', HOVER: 'Hold', RELEASE_FALL: 'Release'
+                };
+                const label = stateMap[engineState] || engineState;
+                this.els.stateLabel.textContent = label;
+                this.els.stateLabel.classList.toggle('active', engineState === 'TRACKING' || engineState === 'HOVER');
+            }
+
+            // --- Frequency ---
             this.els.freq.textContent = S.pitch ? S.pitch.toFixed(1) + ' Hz' : '— Hz';
             this.els.freq.classList.toggle('lit', voiced);
 
+            // --- Volume ---
             const db = sm.loud;
             this.els.vol.textContent = db.toFixed(1) + ' dB';
             const vc = db > -18 ? '#f87171' : db > -42 ? '#fbbf24' : '#4ade80';
@@ -345,20 +449,40 @@
             const bar = document.getElementById('vol-bar');
             if (bar) { bar.style.width=Math.max(0,Math.min(100,((db+70)/60)*100)).toFixed(1)+'%'; bar.style.background=vc; }
 
-            const TC={Dark:['#60a5fa','rgba(59,130,246,.12)'],Warm:['#fbbf24','rgba(245,158,11,.12)'],
-                      Bright:['#fb923c','rgba(249,115,22,.12)'],Brilliant:['#f87171','rgba(239,68,68,.12)']};
+            // --- Timbre ---
+            const TC={Dark:['#60a5fa','rgba(59,130,246,.10)'],Warm:['#fbbf24','rgba(245,158,11,.10)'],
+                      Bright:['#fb923c','rgba(249,115,22,.10)'],Brilliant:['#f87171','rgba(239,68,68,.10)']};
             const tc=TC[S.timbre];
             this.els.timbre.textContent=S.timbre||'—';
-            if(tc&&voiced){this.els.timbre.style.color=tc[0];this.els.timbre.style.background=tc[1];this.els.timbre.style.borderColor=tc[0]+'44';}
-            else{this.els.timbre.style.color='';this.els.timbre.style.background='';this.els.timbre.style.borderColor='';}
+            if(tc&&voiced){
+                this.els.timbre.style.color=tc[0];
+                this.els.timbre.style.background=tc[1];
+                this.els.timbre.style.borderColor=tc[0]+'33';
+                this.els.timbre.classList.add('lit');
+            } else {
+                this.els.timbre.style.color='';
+                this.els.timbre.style.background='';
+                this.els.timbre.style.borderColor='';
+                this.els.timbre.classList.remove('lit');
+            }
 
-            const RC={Bass:['#60a5fa','rgba(59,130,246,.12)'],Chest:['#4ade80','rgba(34,197,94,.12)'],
-                      Mixed:['#fbbf24','rgba(245,158,11,.12)'],Head:['#fb923c','rgba(249,115,22,.12)'],
-                      Whistle:['#f87171','rgba(239,68,68,.12)']};
+            // --- Range ---
+            const RC={Bass:['#60a5fa','rgba(59,130,246,.10)'],Chest:['#4ade80','rgba(34,197,94,.10)'],
+                      Mixed:['#fbbf24','rgba(245,158,11,.10)'],Head:['#fb923c','rgba(249,115,22,.10)'],
+                      Whistle:['#f87171','rgba(239,68,68,.10)']};
             const rc=RC[S.range];
             this.els.range.textContent=voiced?(S.range||'—'):'—';
-            if(rc&&voiced){this.els.range.style.color=rc[0];this.els.range.style.background=rc[1];this.els.range.style.borderColor=rc[0]+'44';}
-            else{this.els.range.style.color='';this.els.range.style.background='';this.els.range.style.borderColor='';}
+            if(rc&&voiced){
+                this.els.range.style.color=rc[0];
+                this.els.range.style.background=rc[1];
+                this.els.range.style.borderColor=rc[0]+'33';
+                this.els.range.classList.add('lit');
+            } else {
+                this.els.range.style.color='';
+                this.els.range.style.background='';
+                this.els.range.style.borderColor='';
+                this.els.range.classList.remove('lit');
+            }
         }
     }
 
@@ -420,9 +544,15 @@
     const ui = new UIManager(audio);
     const engine = new VisualizerEngine('canvas-container', audio);
 
+    // Expose engine smState to UI for state label updates
+    const _origRenderFrame = engine.renderFrame.bind(engine);
+    engine.renderFrame = function() {
+        _origRenderFrame();
+        ui.update(engine.systems?.rings?.smState ?? null);
+    };
+
     const wsManager = new ConnectionManager(CONFIG.wsUrl, (data) => {
         audio.ingestFrame(data);
-        ui.update();
     });
 </script>
 </body>
