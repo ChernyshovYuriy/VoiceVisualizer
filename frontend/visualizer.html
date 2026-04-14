@@ -57,7 +57,6 @@
             overflow:hidden;
         }
 
-        /* thin accent line at top of panel */
         #info-panel::before {
             content:''; display:block;
             height:1px; width:100%;
@@ -82,7 +81,6 @@
             background:rgba(74,222,128,.72); box-shadow:0 0 7px rgba(74,222,128,.5);
         }
 
-        /* note display */
         .note-section {
             padding:12px 0 11px;
             display:flex; align-items:center; gap:14px;
@@ -123,7 +121,6 @@
         }
         #note-name-display.voiced { color:rgba(220,228,248,.58); }
 
-        /* metrics */
         .metrics { padding:10px 0 0; display:flex; flex-direction:column; gap:0; }
         .metric {
             padding:7px 0;
@@ -156,7 +153,6 @@
             color:rgba(60,100,150,.24); pointer-events:none; white-space:nowrap;
         }
 
-        /* state label */
         #state-label {
             position:absolute; top:24px; left:24px;
             font-size:8.5px; font-weight:700; letter-spacing:1.1px; text-transform:uppercase;
@@ -164,29 +160,11 @@
             transition:color .4s;
         }
         #state-label.active { color:rgba(255,200,100,.28); }
-
-        #debug-camera-label {
-            position: absolute;
-            top: 22px;
-            left: 22px;
-            padding: 6px 10px;
-            border-radius: 999px;
-            border: 1px solid rgba(255, 214, 128, 0.45);
-            background: rgba(28, 16, 2, 0.7);
-            color: rgba(255, 224, 168, 0.92);
-            font-size: 10px;
-            font-weight: 700;
-            letter-spacing: 0.9px;
-            text-transform: uppercase;
-            display: none;
-            pointer-events: none;
-        }
     </style>
 </head>
 <body>
 <canvas id="canvas-container"></canvas>
 <div id="ui-layer">
-    <div id="debug-camera-label">DEBUG CAMERA ON</div>
     <div id="state-label">Idle</div>
     <div id="status-badge">
         <div id="status-dot" class="status-dot"></div>
@@ -216,7 +194,9 @@
                 <div class="m-label">Volume</div>
                 <div>
                     <div class="m-value lit" id="v-vol">— dB</div>
-                    <div class="vu-track"><div id="vol-bar"></div></div>
+                    <div class="vu-track">
+                        <div id="vol-bar"></div>
+                    </div>
                 </div>
             </div>
             <div class="metric">
@@ -235,150 +215,48 @@
 <script src="https://unpkg.com/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
 
 <script>
-    /**
-     * ============================================================================
-     * CONFIGURATION & UTILS
-     * ============================================================================
-     */
-    const CONFIG = {
-        wsUrl: 'ws://localhost:8765',
-        bands: 16
-    };
-
+    const CONFIG = { wsUrl: 'ws://localhost:8765', bands: 16 };
     const MathUtils = {
         clamp: (v, lo, hi) => Math.max(lo, Math.min(hi, v)),
         lerp: (a, b, t) => a + (b - a) * t,
         smoothstep: (a, b, x) => {
             const t = MathUtils.clamp((x - a) / (b - a), 0, 1);
             return t * t * (3 - 2 * t);
-        },
-        hsl: (h, s, l) => {
-            h = ((h % 360) + 360) % 360;
-            const a = s * Math.min(l, 1 - l);
-            const f = n => {
-                const k = (n + h / 30) % 12;
-                return l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1));
-            };
-            return { r: f(0), g: f(8), b: f(4) };
         }
     };
 
-    /**
-     * ============================================================================
-     * AUDIO DATA MANAGER
-     * Handles ingestion and smoothing of raw data from the WebSocket
-     * ============================================================================
-     */
     class AudioManager {
         constructor() {
-            this.state = {
-                mel: new Float32Array(64),
-                pitch: 0, loudness: -80, centroid: 900,
-                note: '—', timbre: '—', range: '—',
-                onset: 0, energy: 0, pitchConf: 0,
-                peaks: [], pitchHist: [], loudHist: [],
-                vibratoDepth: 0, loudEnvelope: 0, phraseRising: false
-            };
-
-            this.smoothed = {
-                pitch: 220, loud: -80, centroid: 900,
-                onset: 0, energy: 0, pitchConf: 0,
-                pitchNorm: 0.5, loudNorm: 0, centroidNorm: 0.5
-            };
-
-            this.bandE = new Float32Array(CONFIG.bands);
-            this.sBandE = new Float32Array(CONFIG.bands);
-            this.peakBoost = new Float32Array(CONFIG.bands);
-
+            this.state = { mel: new Float32Array(64), pitch: 0, loudness: -80, centroid: 900, note: '—', timbre: '—', range: '—', onset: 0, pitchConf: 0 };
+            this.smoothed = { pitch: 220, loud: -80, onset: 0, pitchConf: 0, pitchNorm: 0.5, loudNorm: 0 };
             this.transientFlash = 0;
-            this.breathPhase = 0;
             this.lastNote = '—';
         }
-
         ingestFrame(d) {
             const S = this.state;
-            for(let i=0; i<64; i++) S.mel[i] = MathUtils.clamp((d.mel && d.mel[i]) || 0, 0, 1);
-
             S.pitch = d.pitch || 0;
             S.loudness = d.loudness ?? -80;
-            S.centroid = d.centroid || 900;
             S.note = d.note || '—';
             S.timbre = d.timbre || '—';
             S.range = d.range || '—';
             S.onset = d.onset || 0;
-            S.energy = d.energy || 0;
             S.pitchConf = d.pitchConf || 0;
-            S.peaks = d.peaks || [];
-            S.pitchHist = d.pitchHist || [];
-            S.loudHist = d.loudHist || [];
 
-            // Calculate Vibrato
-            if (S.pitchHist.length > 5) {
-                const mean = S.pitchHist.reduce((a, b) => a + b) / S.pitchHist.length;
-                const variance = S.pitchHist.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / S.pitchHist.length;
-                S.vibratoDepth = MathUtils.clamp(Math.sqrt(variance) / 30, 0, 1);
-            }
-
-            // Calculate Loudness Envelope
-            if (S.loudHist.length > 3) {
-                const recent = S.loudHist.slice(-5);
-                const avgRecent = recent.reduce((a, b) => a + b, 0) / recent.length;
-                S.loudEnvelope = MathUtils.clamp((avgRecent + 60) / 40, 0, 1);
-            }
-
-            // Interpolate smoothed values
-            const targetPitch = (S.pitch > 40) ? S.pitch : S.centroid;
+            const targetPitch = (S.pitch > 40) ? S.pitch : 220;
             const sm = this.smoothed;
-
             sm.pitch = MathUtils.lerp(sm.pitch, targetPitch, 0.15);
             sm.loud = MathUtils.lerp(sm.loud, S.loudness, 0.15);
-            sm.centroid = MathUtils.lerp(sm.centroid, S.centroid, 0.12);
             sm.onset = MathUtils.lerp(sm.onset, S.onset, 0.4);
-            sm.energy = MathUtils.lerp(sm.energy, S.energy, 0.2);
             sm.pitchConf = MathUtils.lerp(sm.pitchConf, S.pitchConf, 0.15);
-
-            // Normalization mappings
             sm.pitchNorm = MathUtils.lerp(sm.pitchNorm, MathUtils.clamp((Math.log(MathUtils.clamp(targetPitch, 80, 1500)) - Math.log(80)) / (Math.log(1500) - Math.log(80)), 0, 1), 0.18);
             sm.loudNorm = MathUtils.clamp((sm.loud + 58) / 38, 0, 1);
-            sm.centroidNorm = MathUtils.clamp((Math.log(MathUtils.clamp(sm.centroid, 120, 4000)) - Math.log(120)) / (Math.log(4000) - Math.log(120)), 0, 1);
 
-            // Band calculations
-            const bpb = 64 / CONFIG.bands;
-            this.peakBoost.fill(0);
-
-            for (let b = 0; b < CONFIG.bands; b++) {
-                let sum = 0;
-                const s0 = Math.floor(b * bpb), s1 = Math.floor((b + 1) * bpb);
-                for (let i = s0; i < s1; i++) sum += S.mel[i];
-                this.bandE[b] = sum / (s1 - s0);
-                this.sBandE[b] = MathUtils.lerp(this.sBandE[b], this.bandE[b], 0.22);
-            }
-
-            for (const pk of S.peaks) {
-                const ti = Math.floor(pk.bin / bpb);
-                if (ti >= 0 && ti < CONFIG.bands) this.peakBoost[ti] = Math.max(this.peakBoost[ti], pk.value);
-            }
-
-            // Transients
             if (S.onset > 0.3) this.transientFlash = Math.max(this.transientFlash, S.onset);
-            if (S.note !== '—' && S.note !== this.lastNote) {
-                this.transientFlash = 1;
-                this.lastNote = S.note;
-            }
+            if (S.note !== '—' && S.note !== this.lastNote) { this.transientFlash = 1; this.lastNote = S.note; }
         }
-
-        updateTime(dt) {
-            this.breathPhase += dt * (0.8 + this.smoothed.loudNorm * 0.6 + this.smoothed.pitchConf * 0.3);
-            this.transientFlash *= 0.84; // Decay
-        }
+        updateTime(dt) { this.transientFlash *= 0.84; }
     }
 
-    /**
-     * ============================================================================
-     * UI MANAGER
-     * Handles DOM updates decoupled from the render loop
-     * ============================================================================
-     */
     class UIManager {
         constructor(audioManager) {
             this.audio = audioManager;
@@ -393,166 +271,76 @@
                 pLiveDot: document.getElementById('p-live-dot'),
                 stateLabel: document.getElementById('state-label'),
             };
-            this._lastNote = null;
             this._lastState = null;
         }
-
         update(engineState) {
             const S = this.audio.state;
             const sm = this.audio.smoothed;
             const voiced = S.note && S.note !== '—';
             const ring = document.getElementById('note-ring');
 
-            // --- Note display ---
             this.els.note.textContent = S.note || '—';
             if (voiced) {
                 this.els.note.classList.add('voiced');
                 ring.classList.add('voiced');
-                this.els.noteSub.classList.add('voiced');
-                this.els.noteNameDisplay.classList.add('voiced');
-                this.els.noteSub.textContent = (S.range && S.range !== '—') ? S.range + ' voice' : 'Voiced';
+                this.els.noteSub.textContent = S.range !== '—' ? S.range + ' voice' : 'Voiced';
                 this.els.noteNameDisplay.textContent = S.pitch ? S.pitch.toFixed(1) + ' Hz' : '—';
-                this.els.note.style.textShadow = `0 0 ${12 + sm.pitchConf * 22}px rgba(255,180,80,${(0.18 + this.audio.transientFlash * 0.25).toFixed(2)})`;
                 this.els.pLiveDot.classList.add('active');
             } else {
                 this.els.note.classList.remove('voiced');
                 ring.classList.remove('voiced');
-                this.els.noteSub.classList.remove('voiced');
-                this.els.noteNameDisplay.classList.remove('voiced');
                 this.els.noteSub.textContent = 'No signal';
                 this.els.noteNameDisplay.textContent = '—';
-                this.els.note.style.textShadow = 'none';
                 this.els.pLiveDot.classList.remove('active');
             }
 
-            // --- State label (top-left corner) ---
             if (engineState && engineState !== this._lastState) {
                 this._lastState = engineState;
-                const stateMap = {
-                    IDLE: 'Idle', ATTACK_FROM_BOTTOM: 'Onset',
-                    TRACKING: 'Tracking', HOVER: 'Hold', RELEASE_FALL: 'Release'
-                };
-                const label = stateMap[engineState] || engineState;
-                this.els.stateLabel.textContent = label;
-                this.els.stateLabel.classList.toggle('active', engineState === 'TRACKING' || engineState === 'HOVER');
+                this.els.stateLabel.textContent = engineState;
+                this.els.stateLabel.classList.toggle('active', engineState === 'TRACKING');
             }
 
-            // --- Frequency ---
             this.els.freq.textContent = S.pitch ? S.pitch.toFixed(1) + ' Hz' : '— Hz';
-            this.els.freq.classList.toggle('lit', voiced);
-
-            // --- Volume ---
             const db = sm.loud;
             this.els.vol.textContent = db.toFixed(1) + ' dB';
-            const vc = db > -18 ? '#f87171' : db > -42 ? '#fbbf24' : '#4ade80';
-            this.els.vol.style.color = vc;
             const bar = document.getElementById('vol-bar');
-            if (bar) { bar.style.width=Math.max(0,Math.min(100,((db+70)/60)*100)).toFixed(1)+'%'; bar.style.background=vc; }
-
-            // --- Timbre ---
-            const TC={Dark:['#60a5fa','rgba(59,130,246,.10)'],Warm:['#fbbf24','rgba(245,158,11,.10)'],
-                      Bright:['#fb923c','rgba(249,115,22,.10)'],Brilliant:['#f87171','rgba(239,68,68,.10)']};
-            const tc=TC[S.timbre];
+            if (bar) bar.style.width=Math.max(0,Math.min(100,((db+70)/60)*100)).toFixed(1)+'%';
             this.els.timbre.textContent=S.timbre||'—';
-            if(tc&&voiced){
-                this.els.timbre.style.color=tc[0];
-                this.els.timbre.style.background=tc[1];
-                this.els.timbre.style.borderColor=tc[0]+'33';
-                this.els.timbre.classList.add('lit');
-            } else {
-                this.els.timbre.style.color='';
-                this.els.timbre.style.background='';
-                this.els.timbre.style.borderColor='';
-                this.els.timbre.classList.remove('lit');
-            }
-
-            // --- Range ---
-            const RC={Bass:['#60a5fa','rgba(59,130,246,.10)'],Chest:['#4ade80','rgba(34,197,94,.10)'],
-                      Mixed:['#fbbf24','rgba(245,158,11,.10)'],Head:['#fb923c','rgba(249,115,22,.10)'],
-                      Whistle:['#f87171','rgba(239,68,68,.10)']};
-            const rc=RC[S.range];
-            this.els.range.textContent=voiced?(S.range||'—'):'—';
-            if(rc&&voiced){
-                this.els.range.style.color=rc[0];
-                this.els.range.style.background=rc[1];
-                this.els.range.style.borderColor=rc[0]+'33';
-                this.els.range.classList.add('lit');
-            } else {
-                this.els.range.style.color='';
-                this.els.range.style.background='';
-                this.els.range.style.borderColor='';
-                this.els.range.classList.remove('lit');
-            }
+            this.els.range.textContent=voiced?S.range:'—';
         }
     }
 
-    /**
-     * ============================================================================
-     * CONNECTION MANAGER
-     * Handles WebSocket connection with exponential backoff
-     * ============================================================================
-     */
     class ConnectionManager {
         constructor(url, onMessageCallback) {
-            this.url = url;
-            this.onMessage = onMessageCallback;
-            this.reconnectAttempts = 0;
-            this.dot = document.getElementById('status-dot');
-            this.text = document.getElementById('status-text');
-            this.badge = document.getElementById('status-badge');
+            this.url = url; this.onMessage = onMessageCallback;
             this.connect();
         }
-
-        setStatus(state) {
-            this.dot.className = 'status-dot ' + state;
-            this.badge.className = state;
-            this.text.textContent = state === 'live' ? 'Connected' : state === 'error' ? 'Disconnected' : 'Connecting...';
-        }
-
         connect() {
-            this.setStatus('connecting');
             this.ws = new WebSocket(this.url);
-
-            this.ws.onopen = () => {
-                this.setStatus('live');
-                this.reconnectAttempts = 0;
-            };
-
-            this.ws.onmessage = (e) => {
-                try {
-                    this.onMessage(JSON.parse(e.data));
-                } catch (err) {
-                    console.warn("WS Parse Error", err);
-                }
-            };
-
-            this.ws.onclose = () => {
-                this.setStatus('error');
-                const timeout = Math.min(10000, 1000 * Math.pow(1.5, this.reconnectAttempts));
-                this.reconnectAttempts++;
-                setTimeout(() => this.connect(), timeout);
-            };
-
-            this.ws.onerror = () => this.ws.close();
+            this.ws.onopen = () => { document.getElementById('status-badge').className = 'live'; document.getElementById('status-text').textContent = 'Connected'; };
+            this.ws.onmessage = (e) => { try { this.onMessage(JSON.parse(e.data)); } catch (err) {} };
+            this.ws.onclose = () => { document.getElementById('status-badge').className = 'error'; document.getElementById('status-text').textContent = 'Disconnected'; setTimeout(() => this.connect(), 2000); };
         }
     }
 </script>
 <script src="./visualizer-engine.js"></script>
 <script>
-    // ================= Initialize App =================
     const audio = new AudioManager();
     const ui = new UIManager(audio);
     const engine = new VisualizerEngine('canvas-container', audio);
 
-    // Expose engine smState to UI for state label updates
     const _origRenderFrame = engine.renderFrame.bind(engine);
     engine.renderFrame = function() {
         _origRenderFrame();
         ui.update(engine.systems?.rings?.smState ?? null);
     };
 
-    const wsManager = new ConnectionManager(CONFIG.wsUrl, (data) => {
-        audio.ingestFrame(data);
+    const wsManager = new ConnectionManager(CONFIG.wsUrl, (data) => audio.ingestFrame(data));
+
+    window.addEventListener('resize', () => {
+        engine.camera.aspect = window.innerWidth / window.innerHeight;
+        engine.camera.updateProjectionMatrix();
+        engine.renderer.setSize(window.innerWidth, window.innerHeight);
     });
 </script>
 </body>
