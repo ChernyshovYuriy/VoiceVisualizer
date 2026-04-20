@@ -1,16 +1,16 @@
-PySide6>=6.6.0
-pyqtgraph>=0.13.3
-PyOpenGL>=3.1.7
-PyOpenGL-accelerate>=3.1.7
-numpy>=1.24.0
-librosa>=0.10.1
-sounddevice>=0.4.6
-soundfile>=0.12.1
-scipy>=1.11.0
-websockets>=12.0
+PySide6
+pyqtgraph
+PyOpenGL
+PyOpenGL-accelerate
+numpy
+librosa
+sounddevice
+soundfile
+scipy
+websockets
 # Optional separator backends for offline vocal preprocessing
 # Preferred backend (in-process):
-demucs>=4.0.1
+demucs
 # Fallback backend (CLI):
-spleeter>=2.4.0
+spleeter
 pytest
