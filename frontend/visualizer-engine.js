@@ -1,7 +1,8 @@
 /**
  * ARTISTIC VOICE VISUALIZER ENGINE
- * Fixed: Removed "flower" distortion and vertical line.
- * Behavior: Clean circular rings and orbiting particles that follow Pitch (Y).
+ * Structured architecture:
+ * - BackgroundSystem
+ * - RingSystem (main + 4 sister rings + central beam)
  */
 
 const VISUAL_SCENE_CONFIG = {
@@ -10,7 +11,11 @@ const VISUAL_SCENE_CONFIG = {
     backgroundHaze: 0x14273e,
     cameraDistance: 11.5,
     cameraFOV: 44,
-    particles: { count: 800, size: 0.035, orbitSpeed: 1.5 }
+    ringThickness: 0.055,
+    ringGlow: 0.7,
+    ringOpacity: 0.8,
+    ringEchoCount: 4,
+    axisOpacity: 0.22
 };
 
 class BackgroundSystem {
@@ -36,145 +41,124 @@ class BackgroundSystem {
     }
 }
 
-class ParticleSystem {
-    constructor(scene, getRadius) {
-        this.getRadius = getRadius;
-        this.particles = [];
-        const geo = new THREE.BufferGeometry();
-        const pos = new Float32Array(VISUAL_SCENE_CONFIG.particles.count * 3);
-        const col = new Float32Array(VISUAL_SCENE_CONFIG.particles.count * 3);
-        geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-        geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
-
-        this.points = new THREE.Points(geo, new THREE.PointsMaterial({
-            size: VISUAL_SCENE_CONFIG.particles.size,
-            vertexColors: true,
-            transparent: true,
-            blending: THREE.AdditiveBlending,
-            depthTest: false
-        }));
-        scene.add(this.points);
-
-        for (let i = 0; i < VISUAL_SCENE_CONFIG.particles.count; i++) {
-            this.particles.push({
-                angle: Math.random() * Math.PI * 2,
-                speed: 0.6 + Math.random() * 0.8,
-                radiusOffset: (Math.random() - 0.5) * 0.4, // Tight dispersion
-                pos: new THREE.Vector3(),
-                color: new THREE.Color()
-            });
-        }
-    }
-
-    update(dt, time, ringY, ringCol, flash = 0) {
-        const pAttr = this.points.geometry.attributes.position.array;
-        const cAttr = this.points.geometry.attributes.color.array;
-        const rBase = this.getRadius();
-
-        this.particles.forEach((p, i) => {
-            p.angle += dt * p.speed * VISUAL_SCENE_CONFIG.particles.orbitSpeed;
-
-            // Fixed: Radial logic is now a clean circle (no flower distortion)
-            let r = rBase + p.radiusOffset;
-
-            // Subtle vertical oscillation for depth
-            const yDrift = Math.sin(p.angle * 2.0 + time) * 0.1;
-
-            p.pos.set(
-                Math.cos(p.angle) * r,
-                ringY + yDrift,
-                Math.sin(p.angle) * r
-            );
-
-            const intensity = 0.5 + flash * 2.0;
-            p.color.lerp(ringCol, 0.1);
-
-            const idx = i * 3;
-            cAttr[idx]     = p.color.r * intensity;
-            cAttr[idx + 1] = p.color.g * intensity;
-            cAttr[idx + 2] = p.color.b * intensity;
-            pAttr[idx]     = p.pos.x;
-            pAttr[idx + 1] = p.pos.y;
-            pAttr[idx + 2] = p.pos.z;
-        });
-
-        this.points.geometry.attributes.position.needsUpdate = true;
-        this.points.geometry.attributes.color.needsUpdate = true;
-    }
-}
-
-class DualRingSystem {
+class RingSystem {
     constructor(scene) {
-        const ringShaderMat = (thickness) => new THREE.ShaderMaterial({
+        this.smState = 'IDLE';
+        this.displayY = 0;
+        this.displayRadius = 1.0;
+        this.displayFlash = 0;
+        this.displayColor = new THREE.Color(0.8, 0.55, 0.25);
+        this.rings = [];
+
+        this._createCentralBeam(scene);
+        this._createRings(scene);
+    }
+
+    _createRingMaterial() {
+        return new THREE.ShaderMaterial({
             transparent: true,
             blending: THREE.AdditiveBlending,
             side: THREE.DoubleSide,
             uniforms: {
-                uColor:     { value: new THREE.Color() },
-                uRadius:    { value: 1.0 },
-                uThickness: { value: thickness },
-                uOpacity:   { value: 0.5 },
-                uTime:      { value: 0 },
-                uFlash:     { value: 0 }
+                uColor: { value: new THREE.Color() },
+                uRadius: { value: 1.0 },
+                uThickness: { value: VISUAL_SCENE_CONFIG.ringThickness },
+                uOpacity: { value: VISUAL_SCENE_CONFIG.ringOpacity },
+                uGlow: { value: VISUAL_SCENE_CONFIG.ringGlow },
+                uFlash: { value: 0 }
             },
-            vertexShader: `varying vec2 vUv; void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+            vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
             fragmentShader: `
                 varying vec2 vUv;
                 uniform vec3 uColor;
                 uniform float uRadius;
                 uniform float uThickness;
                 uniform float uOpacity;
-                uniform float uTime;
+                uniform float uGlow;
                 uniform float uFlash;
 
                 void main() {
                     vec2 uv = vUv * 2.0 - 1.0;
+                    uv.x *= 1.08;
                     float dist = length(uv) * 4.0;
                     float ringDist = abs(dist - uRadius);
 
-                    // Fixed: Clean circular profile
-                    float glow = exp(-pow(ringDist / (uThickness + uFlash * 0.3), 2.0));
-                    float core = exp(-pow(ringDist / (uThickness * 0.3), 2.0));
+                    float inner = smoothstep(uThickness * 1.2, uThickness * 0.35, ringDist);
+                    float mid = exp(-pow(ringDist / (uThickness * 0.85), 2.0));
+                    float outer = exp(-pow(ringDist / (uThickness * 1.8), 2.0));
 
-                    float finalAlpha = (glow * 0.8 + core * 0.2);
-                    gl_FragColor = vec4(mix(uColor, vec3(1.0), uFlash * 0.4), finalAlpha * uOpacity);
+                    float alpha = (inner * 0.48 + mid * 0.40 + outer * 0.22) * uOpacity;
+                    vec3 flashMix = mix(uColor, vec3(1.0, 0.94, 0.82), clamp(uFlash * 0.35, 0.0, 0.35));
+                    vec3 color = flashMix * (0.70 + uGlow * 0.30 + mid * 0.18);
+                    gl_FragColor = vec4(color, alpha);
                 }`
         });
-
-        this.innerMat = ringShaderMat(0.04);
-        this.innerRing = new THREE.Mesh(new THREE.PlaneGeometry(12, 12), this.innerMat);
-        this.innerRing.rotation.x = -Math.PI / 2;
-        scene.add(this.innerRing);
-
-        this.displayY = 0.0;
-        this.ringState = { innerRadius: 1.0, innerColor: new THREE.Color() };
-        this.particles = new ParticleSystem(scene, () => this.ringState.innerRadius);
     }
 
-    update(time, liveState, dt) {
-        const voiced = liveState?.active || false;
-        const flash = liveState?.transient || 0;
+    _createCentralBeam(scene) {
+        const beamGeo = new THREE.CylinderGeometry(0.018, 0.018, 10.5, 10, 1, true);
+        const beamMat = new THREE.MeshBasicMaterial({
+            color: new THREE.Color(0x8fa5c2),
+            transparent: true,
+            opacity: VISUAL_SCENE_CONFIG.axisOpacity,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false
+        });
+        this.beam = new THREE.Mesh(beamGeo, beamMat);
+        this.beam.position.y = 0;
+        scene.add(this.beam);
+    }
 
-        if (voiced) {
-            this.displayY = MathUtils.lerp(this.displayY, liveState.y, 0.15);
-        } else {
-            this.displayY = MathUtils.lerp(this.displayY, Math.sin(time * 1.2) * 0.3, 0.08);
+    _createRings(scene) {
+        const offsets = [0, 0.75, 1.5, -0.75, -1.5];
+        const opacityScale = [1.0, 0.72, 0.5, 0.72, 0.5];
+        const radiusScale = [1.0, 0.92, 0.84, 0.92, 0.84];
+
+        for (let i = 0; i < offsets.length; i++) {
+            const mat = this._createRingMaterial();
+            mat.uniforms.uOpacity.value = VISUAL_SCENE_CONFIG.ringOpacity * opacityScale[i];
+
+            const mesh = new THREE.Mesh(new THREE.PlaneGeometry(12, 12), mat);
+            mesh.rotation.x = -Math.PI / 2;
+            scene.add(mesh);
+
+            this.rings.push({
+                mesh,
+                mat,
+                yOffset: offsets[i],
+                radiusScale: radiusScale[i],
+                hueShift: i === 0 ? 0 : (offsets[i] > 0 ? 0.03 : -0.03)
+            });
         }
+    }
 
-        const hue = (liveState?.pitchNorm ?? 0.5) * 0.7;
-        this.ringState.innerColor.lerp(new THREE.Color().setHSL(hue, 0.9, 0.5), 0.1);
+    update(liveState) {
+        const voiced = liveState?.active || false;
+        this.smState = voiced ? 'TRACKING' : 'IDLE';
 
-        const targetRadius = voiced ? 0.9 + liveState.loudNorm * 1.8 : 0.85;
-        this.ringState.innerRadius = MathUtils.lerp(this.ringState.innerRadius, targetRadius, 0.1);
+        const targetY = voiced ? liveState.y : 0.0;
+        const targetRadius = voiced ? 0.9 + liveState.loudNorm * 1.6 : 0.85;
+        const targetFlash = voiced ? liveState.transient : 0;
 
-        this.innerMat.uniforms.uColor.value = this.ringState.innerColor;
-        this.innerMat.uniforms.uRadius.value = this.ringState.innerRadius;
-        this.innerMat.uniforms.uTime.value = time;
-        this.innerMat.uniforms.uFlash.value = flash;
-        this.innerMat.uniforms.uOpacity.value = voiced ? 0.85 : 0.3;
-        this.innerRing.position.y = this.displayY;
+        this.displayY = MathUtils.lerp(this.displayY, targetY, voiced ? 0.18 : 0.08);
+        this.displayRadius = MathUtils.lerp(this.displayRadius, targetRadius, voiced ? 0.14 : 0.08);
+        this.displayFlash = MathUtils.lerp(this.displayFlash, targetFlash, 0.25);
 
-        this.particles.update(dt, time, this.displayY, this.ringState.innerColor, flash);
+        const baseHue = (liveState?.pitchNorm ?? 0.5) * 0.38 + 0.02;
+        const baseSat = 0.72;
+        const baseLight = 0.46;
+        this.displayColor.lerp(new THREE.Color().setHSL(baseHue, baseSat, baseLight), 0.12);
+
+        this.rings.forEach((ring) => {
+            ring.mesh.position.y = this.displayY + ring.yOffset;
+            ring.mat.uniforms.uRadius.value = this.displayRadius * ring.radiusScale;
+            ring.mat.uniforms.uFlash.value = this.displayFlash;
+            ring.mat.uniforms.uColor.value = new THREE.Color().setHSL(
+                MathUtils.clamp(baseHue + ring.hueShift, 0, 1),
+                baseSat * 0.92,
+                baseLight
+            );
+        });
     }
 }
 
@@ -189,23 +173,37 @@ class VisualizerEngine {
         this.camera.position.set(0, 1.5, VISUAL_SCENE_CONFIG.cameraDistance);
         this.controls = new THREE.OrbitControls(this.camera, this.renderer.domElement);
         this.clock = new THREE.Clock();
-        this.systems = { bg: new BackgroundSystem(this.scene), rings: new DualRingSystem(this.scene) };
+        this.systems = {
+            bg: new BackgroundSystem(this.scene),
+            rings: new RingSystem(this.scene)
+        };
         this.animate();
     }
-    renderFrame() {
-        const dt = Math.min(this.clock.getDelta(), 0.033);
-        if (this.controls) this.controls.update();
-        this.audio.updateTime(dt);
+
+    buildLiveState() {
         const sm = this.audio.smoothed;
-        const liveState = {
+        return {
             active: sm.pitch > 40,
             y: -4.0 + sm.pitchNorm * 8.0,
             pitchNorm: sm.pitchNorm,
             loudNorm: sm.loudNorm,
             transient: this.audio.transientFlash
         };
-        this.systems.rings.update(this.clock.elapsedTime, liveState, dt);
+    }
+
+    renderFrame() {
+        const dt = Math.min(this.clock.getDelta(), 0.033);
+        if (this.controls) this.controls.update();
+        this.audio.update(dt);
+
+        const liveState = this.buildLiveState();
+        this.systems.rings.update(liveState);
+
         this.renderer.render(this.scene, this.camera);
     }
-    animate() { this.renderFrame(); requestAnimationFrame(() => this.animate()); }
+
+    animate() {
+        this.renderFrame();
+        requestAnimationFrame(() => this.animate());
+    }
 }
