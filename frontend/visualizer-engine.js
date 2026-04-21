@@ -33,6 +33,9 @@ const VISUAL_SCENE_CONFIG = {
     ringShellDepthStep: 0.05,
     ringMainShellBoost: 1.0,
     ringSisterShellBoost: 0.78,
+    ringMainShellCount: 4,
+    ringSisterShellCount: 2,
+    ringSecondaryUpdateDivisor: 2,
     verticalColorSmoothing: 0.11,
     verticalColorPitchMinY: -3.8,
     verticalColorPitchMaxY: 3.8,
@@ -44,7 +47,8 @@ const VISUAL_SCENE_CONFIG = {
         { t: 0.78, color: 0x4e8b79 }, // muted jade
         { t: 0.9, color: 0x3e8fa2 }, // cyan-blue
         { t: 1.0, color: 0x356da6 } // deep cool blue
-    ]
+    ],
+    maxPixelRatio: 1.5
 };
 
 class BackgroundSystem {
@@ -78,6 +82,13 @@ class RingSystem {
         this.displayFlash = 0;
         this.displayColor = new THREE.Color(0.8, 0.55, 0.25);
         this.rings = [];
+        this._frameCount = 0;
+        this._cachedSignalVectors = {
+            melBands: new THREE.Vector4(),
+            peakShape: new THREE.Vector4(),
+            peakWeights: new THREE.Vector4()
+        };
+        this._planeGeometry = new THREE.PlaneGeometry(12, 12);
 
         this._createCentralBeam(scene);
         this._createRings(scene);
@@ -111,7 +122,8 @@ class RingSystem {
         return new THREE.Color(stops[stops.length - 1].color);
     }
 
-    _createRingMaterial() {
+    _createRingMaterial(quality = 'full') {
+        const useLite = quality === 'lite';
         return new THREE.ShaderMaterial({
             transparent: true,
             blending: THREE.AdditiveBlending,
@@ -140,7 +152,8 @@ class RingSystem {
                 uMelBands: { value: new THREE.Vector4(0.25, 0.2, 0.18, 0.12) },
                 uPitchTightness: { value: 0.7 },
                 uOnsetExcite: { value: 0.0 },
-                uShellDepth: { value: 0.0 }
+                uShellDepth: { value: 0.0 },
+                uLiteMode: { value: useLite ? 1.0 : 0.0 }
             },
             vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
             fragmentShader: `
@@ -169,18 +182,19 @@ class RingSystem {
                 uniform float uPitchTightness;
                 uniform float uOnsetExcite;
                 uniform float uShellDepth;
+                uniform float uLiteMode;
 
                 void main() {
                     vec2 uv = vUv * 2.0 - 1.0;
                     uv.x *= 1.08;
                     float theta = atan(uv.y, uv.x);
                     float p0 = sin(theta * (3.0 + uPeakShape.x * 9.0) + uRingPhase * 0.8 + uTime * 0.45);
-                    float p1 = sin(theta * (5.0 + uPeakShape.y * 11.0) + uRingPhase * 1.2 + uTime * 0.35);
-                    float p2 = sin(theta * (8.0 + uPeakShape.z * 15.0) - uRingPhase * 0.7 + uTime * 0.25);
+                    float p1 = sin(theta * (5.0 + uPeakShape.y * 11.0) + uRingPhase * 1.2 + uTime * 0.35) * (1.0 - uLiteMode * 0.45);
+                    float p2 = sin(theta * (8.0 + uPeakShape.z * 15.0) - uRingPhase * 0.7 + uTime * 0.25) * (1.0 - uLiteMode * 0.7);
                     float peakContour = p0 * uPeakWeights.x + p1 * uPeakWeights.y + p2 * uPeakWeights.z;
                     float harmonicA = sin(theta * (4.0 + uHarmonicRichness * 5.0) + uTime * 1.1 + uRingPhase);
-                    float harmonicB = sin(theta * (8.0 + uHarmonicRichness * 8.0) - uTime * 0.8 + uRingPhase * 1.7);
-                    float melTexturing = sin(theta * (14.0 + uMelBands.x * 10.0) + uTime * 0.18) * uMelBands.y;
+                    float harmonicB = sin(theta * (8.0 + uHarmonicRichness * 8.0) - uTime * 0.8 + uRingPhase * 1.7) * (1.0 - uLiteMode * 0.65);
+                    float melTexturing = sin(theta * (14.0 + uMelBands.x * 10.0) + uTime * 0.18) * uMelBands.y * (1.0 - uLiteMode * 0.7);
                     float onsetPulse = (sin(theta * 2.0 - uTime * 1.7) * 0.5 + 0.5) * uOnsetExcite;
                     float tighten = mix(0.25, 1.0, uPitchTightness);
                     float rippleA = harmonicA * uVariation;
@@ -195,8 +209,8 @@ class RingSystem {
                     float inner = smoothstep(uThickness * innerSharp, uThickness * innerSoft, ringDist);
                     float mid = exp(-pow(ringDist / (uThickness * mix(1.05, 0.8, uHardness)), 2.0));
                     float outer = exp(-pow(ringDist / (uThickness * mix(2.2, 1.7, uHardness)), 2.0));
-                    float halo = exp(-pow(ringDist / (uThickness * 2.8), 2.0));
-                    float sisterStroke = exp(-pow((ringDist - uThickness * uLayerLift) / (uThickness * 1.2), 2.0));
+                    float halo = exp(-pow(ringDist / (uThickness * mix(2.2, 2.8, 1.0 - uLiteMode * 0.5)), 2.0));
+                    float sisterStroke = exp(-pow((ringDist - uThickness * uLayerLift) / (uThickness * mix(1.0, 1.2, 1.0 - uLiteMode * 0.4)), 2.0));
                     float coreStroke = exp(-pow((ringDist + uThickness * 0.28) / (uThickness * 0.72), 2.0));
                     float depthBand = smoothstep(-0.25, 0.75, uv.y + uDepthBias * 0.9);
                     float shellDepthBand = smoothstep(-0.65, 0.8, uv.y + uShellDepth * 1.4);
@@ -261,15 +275,16 @@ class RingSystem {
         for (let i = 0; i < offsets.length; i++) {
             const group = new THREE.Group();
             scene.add(group);
-            const shells = shellProfiles.map((shell) => {
-                const mat = this._createRingMaterial();
+            const shellLimit = i === 0 ? VISUAL_SCENE_CONFIG.ringMainShellCount : VISUAL_SCENE_CONFIG.ringSisterShellCount;
+            const shells = shellProfiles.slice(0, shellLimit).map((shell) => {
+                const mat = this._createRingMaterial(i === 0 ? 'full' : 'lite');
                 mat.uniforms.uLayerRole.value = shell.role;
                 mat.uniforms.uLayerMix.value.set(shell.mix[0], shell.mix[1], shell.mix[2], shell.mix[3]);
                 mat.uniforms.uLayerLift.value = VISUAL_SCENE_CONFIG.ringLayerLift * shell.lift;
                 mat.uniforms.uOpacity.value = VISUAL_SCENE_CONFIG.ringOpacity * opacityScale[i] * shell.opacity;
                 mat.uniforms.uShellDepth.value = shell.depth;
 
-                const mesh = new THREE.Mesh(new THREE.PlaneGeometry(12, 12), mat);
+                const mesh = new THREE.Mesh(this._planeGeometry, mat);
                 mesh.rotation.x = -Math.PI / 2;
                 mesh.position.z = shell.depth * VISUAL_SCENE_CONFIG.ringShellDepthStep * (i === 0 ? VISUAL_SCENE_CONFIG.ringMainShellBoost : VISUAL_SCENE_CONFIG.ringSisterShellBoost);
                 group.add(mesh);
@@ -289,6 +304,7 @@ class RingSystem {
     }
 
     update(liveState) {
+        this._frameCount += 1;
         const voiced = liveState?.active || false;
         this.smState = voiced ? 'TRACKING' : 'IDLE';
 
@@ -327,6 +343,9 @@ class RingSystem {
         const melBands = liveState?.melBands ?? [0.25, 0.2, 0.16, 0.12];
         const peakShape = liveState?.peakShape ?? [0.1, 0.2, 0.3, 0.0];
         const peakWeights = liveState?.peakWeights ?? [0.35, 0.25, 0.2, 0.0];
+        this._cachedSignalVectors.melBands.set(melBands[0], melBands[1], melBands[2], melBands[3]);
+        this._cachedSignalVectors.peakShape.set(peakShape[0], peakShape[1], peakShape[2], peakShape[3]);
+        this._cachedSignalVectors.peakWeights.set(peakWeights[0], peakWeights[1], peakWeights[2], peakWeights[3]);
         this.displayColor.lerp(targetColor, VISUAL_SCENE_CONFIG.verticalColorSmoothing);
 
         const sisterCoupling = MathUtils.lerp(0.96, 1.0, liveState?.sisterRichness ?? 0);
@@ -338,25 +357,28 @@ class RingSystem {
             ring.group.position.z = (idx - 2) * VISUAL_SCENE_CONFIG.ringDepthStagger * (liveState?.depthSpread ?? 0.35);
             ring.group.rotation.z = (idx - 2) * (liveState?.ringTilt ?? 0.0);
             const coupledScale = idx === 0 ? 1.0 : sisterCoupling;
+            const isSecondaryPass = idx !== 0;
+            const shouldUpdateDetail = !isSecondaryPass || this._frameCount % VISUAL_SCENE_CONFIG.ringSecondaryUpdateDivisor === 0;
             ring.shells.forEach(({ mat, shell }, shellIdx) => {
                 mat.uniforms.uRadius.value = this.displayRadius * ring.radiusScale * coupledScale * shell.radius;
                 mat.uniforms.uFlash.value = this.displayFlash;
                 mat.uniforms.uThickness.value = thicknessBase * (idx === 0 ? 1.0 : 0.9) * shell.thickness;
                 mat.uniforms.uOpacity.value = opacityBase * ring.opacityScale * shell.opacity;
                 mat.uniforms.uTime.value += 0.016;
+                mat.uniforms.uRingPhase.value = ring.phase + shellIdx * 0.14;
+                mat.uniforms.uColor.value.copy(this.displayColor).multiplyScalar(ring.toneScale * (1.0 - shellIdx * 0.05));
+                if (!shouldUpdateDetail) return;
                 mat.uniforms.uVariation.value = variation * (idx === 0 ? 1.0 : 0.82);
                 mat.uniforms.uContour.value = contour;
                 mat.uniforms.uBandBias.value = liveState?.centroidNorm ?? 0.2;
-                mat.uniforms.uRingPhase.value = ring.phase + shellIdx * 0.14;
                 mat.uniforms.uDepthBias.value = depthBias * (idx === 0 ? 1.0 : 0.72);
                 mat.uniforms.uHardness.value = hardness;
                 mat.uniforms.uHarmonicRichness.value = harmonicRichness;
                 mat.uniforms.uOnsetExcite.value = onsetExcite * (1.0 - shellIdx * 0.14);
                 mat.uniforms.uPitchTightness.value = pitchTightness;
-                mat.uniforms.uMelBands.value.set(melBands[0], melBands[1], melBands[2], melBands[3]);
-                mat.uniforms.uPeakShape.value.set(peakShape[0], peakShape[1], peakShape[2], peakShape[3]);
-                mat.uniforms.uPeakWeights.value.set(peakWeights[0], peakWeights[1], peakWeights[2], peakWeights[3]);
-                mat.uniforms.uColor.value.copy(this.displayColor).multiplyScalar(ring.toneScale * (1.0 - shellIdx * 0.05));
+                mat.uniforms.uMelBands.value.copy(this._cachedSignalVectors.melBands);
+                mat.uniforms.uPeakShape.value.copy(this._cachedSignalVectors.peakShape);
+                mat.uniforms.uPeakWeights.value.copy(this._cachedSignalVectors.peakWeights);
             });
         });
     }
@@ -367,6 +389,7 @@ class VisualizerEngine {
         this.audio = audioManager;
         this.canvas = document.getElementById(canvasId);
         this.renderer = new THREE.WebGLRenderer({ canvas: this.canvas, antialias: true });
+        this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, VISUAL_SCENE_CONFIG.maxPixelRatio));
         this.renderer.setSize(window.innerWidth, window.innerHeight);
         this.scene = new THREE.Scene();
         this.camera = new THREE.PerspectiveCamera(VISUAL_SCENE_CONFIG.cameraFOV, window.innerWidth / window.innerHeight, 0.1, 100);
@@ -425,20 +448,42 @@ class VisualizerEngine {
                 spread: 0.0
             };
         }
-        const sorted = [...peaks]
-            .filter((p) => Number.isFinite(p?.value) && Number.isFinite(p?.bin))
-            .sort((a, b) => (b.value ?? 0) - (a.value ?? 0))
-            .slice(0, 3);
-        const total = Math.max(0.001, sorted.reduce((acc, p) => acc + Math.max(0, p.value ?? 0), 0));
+        const top = [{ bin: 0, value: 0 }, { bin: 0, value: 0 }, { bin: 0, value: 0 }];
+        for (let i = 0; i < peaks.length; i++) {
+            const p = peaks[i];
+            const value = p?.value ?? 0;
+            const bin = p?.bin ?? 0;
+            if (!Number.isFinite(value) || !Number.isFinite(bin)) continue;
+            if (value > top[0].value) {
+                top[2] = top[1];
+                top[1] = top[0];
+                top[0] = { bin, value };
+            } else if (value > top[1].value) {
+                top[2] = top[1];
+                top[1] = { bin, value };
+            } else if (value > top[2].value) {
+                top[2] = { bin, value };
+            }
+        }
+        const total = Math.max(0.001, top[0].value + top[1].value + top[2].value);
         const shape = [0, 0, 0, 0];
         const weights = [0, 0, 0, 0];
         for (let i = 0; i < 3; i++) {
-            const p = sorted[i] ?? { bin: i * 8, value: 0 };
+            const p = top[i]?.value > 0 ? top[i] : { bin: i * 8, value: 0 };
             shape[i] = MathUtils.clamp((p.bin ?? 0) / 64, 0, 1);
             weights[i] = MathUtils.clamp((p.value ?? 0) / total, 0, 1);
         }
-        const bins = sorted.map((p) => p.bin ?? 0);
-        const spread = bins.length > 1 ? MathUtils.clamp((Math.max(...bins) - Math.min(...bins)) / 64, 0, 1) : 0;
+        let spread = 0;
+        let minBin = Infinity;
+        let maxBin = -Infinity;
+        let activeBins = 0;
+        for (let i = 0; i < top.length; i++) {
+            if (top[i].value <= 0) continue;
+            activeBins += 1;
+            minBin = Math.min(minBin, top[i].bin);
+            maxBin = Math.max(maxBin, top[i].bin);
+        }
+        if (activeBins > 1) spread = MathUtils.clamp((maxBin - minBin) / 64, 0, 1);
         const confGain = MathUtils.lerp(0.28, 1.0, MathUtils.clamp(pitchConf, 0, 1));
         return {
             shape,
@@ -459,10 +504,22 @@ class VisualizerEngine {
         const memoryOffset = (sm.histPitchNorm - sm.pitchNorm) * 0.7;
         const transient = MathUtils.clamp(this.audio.transientFlash * 0.75 + sm.histOnset * 0.35, 0, 1);
         const sisterRichness = MathUtils.clamp(0.6 * sm.peakSpread + 0.4 * sm.centroidNorm, 0, 1);
-        const peakVals = (S?.peaks || []).map((p) => p?.value ?? 0).filter((v) => Number.isFinite(v));
-        const peakBins = (S?.peaks || []).map((p) => p?.bin ?? 0).filter((v) => Number.isFinite(v));
-        const peakMean = peakVals.length ? this._average(peakVals, 0) : 0;
-        const peakCluster = peakBins.length ? MathUtils.clamp(1 - (Math.max(...peakBins) - Math.min(...peakBins)) / 63, 0, 1) : 0;
+        const peaks = S?.peaks || [];
+        let peakCount = 0;
+        let peakSum = 0;
+        let minBin = Infinity;
+        let maxBin = -Infinity;
+        for (let i = 0; i < peaks.length; i++) {
+            const value = peaks[i]?.value ?? 0;
+            const bin = peaks[i]?.bin ?? 0;
+            if (!Number.isFinite(value) || !Number.isFinite(bin)) continue;
+            peakCount += 1;
+            peakSum += value;
+            minBin = Math.min(minBin, bin);
+            maxBin = Math.max(maxBin, bin);
+        }
+        const peakMean = peakCount ? peakSum / peakCount : 0;
+        const peakCluster = peakCount ? MathUtils.clamp(1 - (maxBin - minBin) / 63, 0, 1) : 0;
         const harmonicRichness = MathUtils.clamp(0.65 * peakMean + 0.35 * (1 - peakCluster), 0, 1);
         const centroidHistAvg = this._average(S?.centroidHist, S?.centroid ?? 900);
         const centroidMemory = MathUtils.clamp((centroidHistAvg - 250) / 3600, 0, 1);
@@ -510,7 +567,7 @@ class VisualizerEngine {
 
     renderFrame() {
         const dt = Math.min(this.clock.getDelta(), 0.033);
-        if (this.controls) this.controls.update();
+        if (this.controls && (this.controls.enableDamping || this.controls.autoRotate)) this.controls.update();
         this.audio.update(dt);
 
         const liveState = this.buildLiveState();
