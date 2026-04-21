@@ -24,7 +24,19 @@ const VISUAL_SCENE_CONFIG = {
     ringAttack: 0.2,
     ringRelease: 0.075,
     ringYOffsetAttack: 0.17,
-    ringYOffsetRelease: 0.07
+    ringYOffsetRelease: 0.07,
+    paletteSmoothing: 0.1,
+    paletteSisterShift: 0.2,
+    paletteBeamLift: 0.05,
+    paletteStops: [
+        { t: 0.00, color: 0x7b2b24 }, // deep ember red
+        { t: 0.22, color: 0xa1492b }, // warm copper
+        { t: 0.46, color: 0xbd7a2c }, // amber-gold
+        { t: 0.62, color: 0xb99c55 }, // muted warm gold
+        { t: 0.78, color: 0x5f987d }, // desaturated jade
+        { t: 0.90, color: 0x4f8fa0 }, // muted cyan
+        { t: 1.00, color: 0x4b6e96 }  // calm blue
+    ]
 };
 
 class BackgroundSystem {
@@ -57,10 +69,34 @@ class RingSystem {
         this.displayRadius = 1.0;
         this.displayFlash = 0;
         this.displayColor = new THREE.Color(0.8, 0.55, 0.25);
+        this.displayPitchNorm = 0.5;
         this.rings = [];
 
         this._createCentralBeam(scene);
         this._createRings(scene);
+    }
+
+    _colorFromVerticalNorm(verticalNorm, flash = 0) {
+        const t = MathUtils.clamp(verticalNorm, 0, 1);
+        const stops = VISUAL_SCENE_CONFIG.paletteStops;
+        let left = stops[0];
+        let right = stops[stops.length - 1];
+
+        for (let i = 0; i < stops.length - 1; i++) {
+            const a = stops[i];
+            const b = stops[i + 1];
+            if (t >= a.t && t <= b.t) {
+                left = a;
+                right = b;
+                break;
+            }
+        }
+
+        const span = Math.max(1e-5, right.t - left.t);
+        const localT = MathUtils.clamp((t - left.t) / span, 0, 1);
+        const base = new THREE.Color(left.color).lerp(new THREE.Color(right.color), localT);
+        const lift = MathUtils.clamp(flash * 0.18, 0, 0.18);
+        return base.lerp(new THREE.Color(0xf0debf), lift);
     }
 
     _createRingMaterial() {
@@ -144,8 +180,7 @@ class RingSystem {
                 mat,
                 yOffset: offsets[i],
                 radiusScale: radiusScale[i],
-                opacityScale: opacityScale[i],
-                hueShift: i === 0 ? 0 : (offsets[i] > 0 ? 0.02 : -0.02)
+                opacityScale: opacityScale[i]
             });
         }
     }
@@ -171,13 +206,24 @@ class RingSystem {
         this.displayRadius = MathUtils.lerp(this.displayRadius, targetRadius, radiusFollow);
         this.displayFlash = MathUtils.lerp(this.displayFlash, targetFlash, 0.22);
 
-        const baseHue = (liveState?.pitchNorm ?? 0.5) * 0.38 + 0.02;
-        const baseSat = MathUtils.lerp(0.58, 0.76, liveState?.sisterRichness ?? 0);
-        const baseLight = MathUtils.lerp(0.40, 0.52, liveState?.centroidNorm ?? 0.2);
-        this.displayColor.lerp(new THREE.Color().setHSL(baseHue, baseSat, baseLight), 0.12);
+        this.displayPitchNorm = MathUtils.lerp(
+            this.displayPitchNorm,
+            liveState?.pitchNorm ?? 0.5,
+            VISUAL_SCENE_CONFIG.paletteSmoothing
+        );
+        this.displayColor.lerp(
+            this._colorFromVerticalNorm(this.displayPitchNorm, this.displayFlash),
+            VISUAL_SCENE_CONFIG.paletteSmoothing
+        );
 
         const sisterCoupling = MathUtils.lerp(0.96, 1.0, liveState?.sisterRichness ?? 0);
         this.beam.position.y = this.displayY;
+        this.beam.material.color.copy(
+            this._colorFromVerticalNorm(
+                this.displayPitchNorm + VISUAL_SCENE_CONFIG.paletteBeamLift,
+                this.displayFlash * 0.5
+            )
+        );
 
         this.rings.forEach((ring, idx) => {
             ring.mesh.position.y = this.displayY + ring.yOffset;
@@ -186,11 +232,8 @@ class RingSystem {
             ring.mat.uniforms.uFlash.value = this.displayFlash;
             ring.mat.uniforms.uThickness.value = thicknessBase * (idx === 0 ? 1.0 : 0.9);
             ring.mat.uniforms.uOpacity.value = opacityBase * ring.opacityScale;
-            ring.mat.uniforms.uColor.value = new THREE.Color().setHSL(
-                MathUtils.clamp(baseHue + ring.hueShift, 0, 1),
-                baseSat * 0.9,
-                baseLight
-            );
+            const ringPitchNorm = this.displayPitchNorm + ring.yOffset * VISUAL_SCENE_CONFIG.paletteSisterShift;
+            ring.mat.uniforms.uColor.value = this._colorFromVerticalNorm(ringPitchNorm, this.displayFlash);
         });
     }
 }
