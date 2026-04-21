@@ -24,7 +24,10 @@ const VISUAL_SCENE_CONFIG = {
     ringAttack: 0.2,
     ringRelease: 0.075,
     ringYOffsetAttack: 0.17,
-    ringYOffsetRelease: 0.07
+    ringYOffsetRelease: 0.07,
+    ringLayerLift: 0.055,
+    ringHaloOpacity: 0.32,
+    ringContourDepth: 0.075
 };
 
 class BackgroundSystem {
@@ -74,7 +77,14 @@ class RingSystem {
                 uThickness: { value: VISUAL_SCENE_CONFIG.ringThickness },
                 uOpacity: { value: VISUAL_SCENE_CONFIG.ringOpacity },
                 uGlow: { value: VISUAL_SCENE_CONFIG.ringGlow },
-                uFlash: { value: 0 }
+                uFlash: { value: 0 },
+                uTime: { value: 0 },
+                uVariation: { value: 0.25 },
+                uContour: { value: 0.3 },
+                uLayerLift: { value: VISUAL_SCENE_CONFIG.ringLayerLift },
+                uBandBias: { value: 0.0 },
+                uRingPhase: { value: 0.0 },
+                uHaloOpacity: { value: VISUAL_SCENE_CONFIG.ringHaloOpacity }
             },
             vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
             fragmentShader: `
@@ -85,20 +95,46 @@ class RingSystem {
                 uniform float uOpacity;
                 uniform float uGlow;
                 uniform float uFlash;
+                uniform float uTime;
+                uniform float uVariation;
+                uniform float uContour;
+                uniform float uLayerLift;
+                uniform float uBandBias;
+                uniform float uRingPhase;
+                uniform float uHaloOpacity;
 
                 void main() {
                     vec2 uv = vUv * 2.0 - 1.0;
                     uv.x *= 1.08;
-                    float dist = length(uv) * 4.0;
+                    float theta = atan(uv.y, uv.x);
+                    float rippleA = sin(theta * 4.0 + uTime * 1.1 + uRingPhase) * uVariation;
+                    float rippleB = sin(theta * 9.0 - uTime * 0.8 + uRingPhase * 1.7) * (uContour * 0.65);
+                    float contourWarp = 1.0 + rippleA * 0.03 + rippleB * 0.02;
+                    float dist = length(uv) * 4.0 * contourWarp;
                     float ringDist = abs(dist - uRadius);
 
-                    float inner = smoothstep(uThickness * 1.2, uThickness * 0.35, ringDist);
-                    float mid = exp(-pow(ringDist / (uThickness * 0.85), 2.0));
-                    float outer = exp(-pow(ringDist / (uThickness * 1.8), 2.0));
+                    float inner = smoothstep(uThickness * 1.3, uThickness * 0.33, ringDist);
+                    float mid = exp(-pow(ringDist / (uThickness * 0.9), 2.0));
+                    float outer = exp(-pow(ringDist / (uThickness * 1.9), 2.0));
+                    float halo = exp(-pow(ringDist / (uThickness * 2.8), 2.0));
+                    float sisterStroke = exp(-pow((ringDist - uThickness * uLayerLift) / (uThickness * 1.2), 2.0));
+                    float coreStroke = exp(-pow((ringDist + uThickness * 0.28) / (uThickness * 0.72), 2.0));
 
-                    float alpha = (inner * 0.48 + mid * 0.40 + outer * 0.22) * uOpacity;
+                    float layeredAlpha =
+                        inner * 0.36 +
+                        mid * 0.36 +
+                        outer * 0.17 +
+                        halo * uHaloOpacity +
+                        sisterStroke * 0.14 +
+                        coreStroke * 0.10;
+                    float alpha = layeredAlpha * uOpacity;
                     vec3 flashMix = mix(uColor, vec3(1.0, 0.94, 0.82), clamp(uFlash * 0.35, 0.0, 0.35));
-                    vec3 color = flashMix * (0.70 + uGlow * 0.30 + mid * 0.18);
+                    vec3 edgeWarm = vec3(1.0, 0.93, 0.80);
+                    vec3 coreColor = mix(flashMix, edgeWarm, clamp(coreStroke * 0.5 + uFlash * 0.2, 0.0, 0.55));
+                    vec3 haloTint = mix(flashMix, vec3(0.72, 0.82, 0.95), clamp(uBandBias * 0.35, 0.0, 0.35));
+                    vec3 color =
+                        coreColor * (0.54 + uGlow * 0.22 + mid * 0.24) +
+                        haloTint * (halo * 0.22 + sisterStroke * 0.14);
                     gl_FragColor = vec4(color, alpha);
                 }`
         });
@@ -145,7 +181,8 @@ class RingSystem {
                 yOffset: offsets[i],
                 radiusScale: radiusScale[i],
                 opacityScale: opacityScale[i],
-                hueShift: i === 0 ? 0 : (offsets[i] > 0 ? 0.02 : -0.02)
+                hueShift: i === 0 ? 0 : (offsets[i] > 0 ? 0.02 : -0.02),
+                phase: i * 0.83
             });
         }
     }
@@ -174,6 +211,8 @@ class RingSystem {
         const baseHue = (liveState?.pitchNorm ?? 0.5) * 0.38 + 0.02;
         const baseSat = MathUtils.lerp(0.58, 0.76, liveState?.sisterRichness ?? 0);
         const baseLight = MathUtils.lerp(0.40, 0.52, liveState?.centroidNorm ?? 0.2);
+        const contour = MathUtils.lerp(VISUAL_SCENE_CONFIG.ringContourDepth, 0.16, liveState?.peakSpread ?? 0);
+        const variation = MathUtils.lerp(0.08, 0.42, liveState?.melPresence ?? 0);
         this.displayColor.lerp(new THREE.Color().setHSL(baseHue, baseSat, baseLight), 0.12);
 
         const sisterCoupling = MathUtils.lerp(0.96, 1.0, liveState?.sisterRichness ?? 0);
@@ -186,6 +225,11 @@ class RingSystem {
             ring.mat.uniforms.uFlash.value = this.displayFlash;
             ring.mat.uniforms.uThickness.value = thicknessBase * (idx === 0 ? 1.0 : 0.9);
             ring.mat.uniforms.uOpacity.value = opacityBase * ring.opacityScale;
+            ring.mat.uniforms.uTime.value += 0.016;
+            ring.mat.uniforms.uVariation.value = variation * (idx === 0 ? 1.0 : 0.82);
+            ring.mat.uniforms.uContour.value = contour;
+            ring.mat.uniforms.uBandBias.value = liveState?.centroidNorm ?? 0.2;
+            ring.mat.uniforms.uRingPhase.value = ring.phase;
             ring.mat.uniforms.uColor.value = new THREE.Color().setHSL(
                 MathUtils.clamp(baseHue + ring.hueShift, 0, 1),
                 baseSat * 0.9,
@@ -215,9 +259,23 @@ class VisualizerEngine {
 
     buildLiveState() {
         const sm = this.audio.smoothed;
+        const mel = this.audio.state?.mel;
         const conf = MathUtils.clamp(sm.pitchConf, 0, 1);
         const pitchMix = MathUtils.lerp(sm.histPitchNorm, sm.pitchNorm, conf);
         const loudMix = MathUtils.clamp(0.56 * sm.loudNorm + 0.34 * sm.energyNorm + 0.10 * sm.histLoudNorm, 0, 1);
+        let melPresence = 0.35;
+        if (mel && mel.length) {
+            const len = mel.length;
+            const lowEnd = Math.max(1, Math.floor(len * 0.35));
+            const highStart = Math.min(len - 1, Math.floor(len * 0.55));
+            let low = 0;
+            let high = 0;
+            for (let i = 0; i < lowEnd; i++) low += mel[i];
+            for (let i = highStart; i < len; i++) high += mel[i];
+            low = low / lowEnd;
+            high = high / Math.max(1, len - highStart);
+            melPresence = MathUtils.clamp(0.58 * low + 0.42 * high, 0, 1);
+        }
         const yFromPitch = -3.8 + pitchMix * 7.6;
         const memoryOffset = (sm.histPitchNorm - sm.pitchNorm) * 0.7;
         const transient = MathUtils.clamp(this.audio.transientFlash * 0.75 + sm.histOnset * 0.35, 0, 1);
@@ -232,7 +290,9 @@ class VisualizerEngine {
             transient,
             stability: conf,
             sisterRichness,
-            centroidNorm: sm.centroidNorm
+            centroidNorm: sm.centroidNorm,
+            peakSpread: sm.peakSpread,
+            melPresence
         };
     }
 
