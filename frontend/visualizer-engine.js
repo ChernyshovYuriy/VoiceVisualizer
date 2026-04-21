@@ -27,7 +27,19 @@ const VISUAL_SCENE_CONFIG = {
     ringYOffsetRelease: 0.07,
     ringLayerLift: 0.055,
     ringHaloOpacity: 0.32,
-    ringContourDepth: 0.075
+    ringContourDepth: 0.075,
+    verticalColorSmoothing: 0.11,
+    verticalColorPitchMinY: -3.8,
+    verticalColorPitchMaxY: 3.8,
+    verticalPaletteStops: [
+        { t: 0.0, color: 0x6e2520 }, // deep ember red
+        { t: 0.24, color: 0x9d4724 }, // burnt orange
+        { t: 0.46, color: 0xb8742f }, // amber
+        { t: 0.62, color: 0xc59a46 }, // muted gold
+        { t: 0.78, color: 0x4e8b79 }, // muted jade
+        { t: 0.9, color: 0x3e8fa2 }, // cyan-blue
+        { t: 1.0, color: 0x356da6 } // deep cool blue
+    ]
 };
 
 class BackgroundSystem {
@@ -64,6 +76,34 @@ class RingSystem {
 
         this._createCentralBeam(scene);
         this._createRings(scene);
+    }
+
+    _mapYToVerticalNorm(y) {
+        return MathUtils.clamp(
+            (y - VISUAL_SCENE_CONFIG.verticalColorPitchMinY) /
+            (VISUAL_SCENE_CONFIG.verticalColorPitchMaxY - VISUAL_SCENE_CONFIG.verticalColorPitchMinY),
+            0,
+            1
+        );
+    }
+
+    _sampleVerticalPalette(verticalNorm) {
+        const stops = VISUAL_SCENE_CONFIG.verticalPaletteStops;
+        if (!stops || stops.length === 0) return new THREE.Color(0x8fa5c2);
+
+        if (verticalNorm <= stops[0].t) return new THREE.Color(stops[0].color);
+        if (verticalNorm >= stops[stops.length - 1].t) return new THREE.Color(stops[stops.length - 1].color);
+
+        for (let i = 0; i < stops.length - 1; i++) {
+            const a = stops[i];
+            const b = stops[i + 1];
+            if (verticalNorm >= a.t && verticalNorm <= b.t) {
+                const localT = MathUtils.clamp((verticalNorm - a.t) / (b.t - a.t), 0, 1);
+                return new THREE.Color(a.color).lerp(new THREE.Color(b.color), localT);
+            }
+        }
+
+        return new THREE.Color(stops[stops.length - 1].color);
     }
 
     _createRingMaterial() {
@@ -181,7 +221,7 @@ class RingSystem {
                 yOffset: offsets[i],
                 radiusScale: radiusScale[i],
                 opacityScale: opacityScale[i],
-                hueShift: i === 0 ? 0 : (offsets[i] > 0 ? 0.02 : -0.02),
+                toneScale: i === 0 ? 1.0 : (Math.abs(offsets[i]) < farOffset ? 0.95 : 0.9),
                 phase: i * 0.83
             });
         }
@@ -208,15 +248,21 @@ class RingSystem {
         this.displayRadius = MathUtils.lerp(this.displayRadius, targetRadius, radiusFollow);
         this.displayFlash = MathUtils.lerp(this.displayFlash, targetFlash, 0.22);
 
-        const baseHue = (liveState?.pitchNorm ?? 0.5) * 0.38 + 0.02;
-        const baseSat = MathUtils.lerp(0.58, 0.76, liveState?.sisterRichness ?? 0);
-        const baseLight = MathUtils.lerp(0.40, 0.52, liveState?.centroidNorm ?? 0.2);
+        const pitchNorm = liveState?.pitchNorm ?? this._mapYToVerticalNorm(this.displayY);
+        const mappedY = MathUtils.lerp(
+            VISUAL_SCENE_CONFIG.verticalColorPitchMinY,
+            VISUAL_SCENE_CONFIG.verticalColorPitchMaxY,
+            pitchNorm
+        );
+        const verticalNorm = this._mapYToVerticalNorm(mappedY);
+        const targetColor = this._sampleVerticalPalette(verticalNorm);
         const contour = MathUtils.lerp(VISUAL_SCENE_CONFIG.ringContourDepth, 0.16, liveState?.peakSpread ?? 0);
         const variation = MathUtils.lerp(0.08, 0.42, liveState?.melPresence ?? 0);
-        this.displayColor.lerp(new THREE.Color().setHSL(baseHue, baseSat, baseLight), 0.12);
+        this.displayColor.lerp(targetColor, VISUAL_SCENE_CONFIG.verticalColorSmoothing);
 
         const sisterCoupling = MathUtils.lerp(0.96, 1.0, liveState?.sisterRichness ?? 0);
         this.beam.position.y = this.displayY;
+        this.beam.material.color.copy(this.displayColor).multiplyScalar(0.92);
 
         this.rings.forEach((ring, idx) => {
             ring.mesh.position.y = this.displayY + ring.yOffset;
@@ -230,11 +276,7 @@ class RingSystem {
             ring.mat.uniforms.uContour.value = contour;
             ring.mat.uniforms.uBandBias.value = liveState?.centroidNorm ?? 0.2;
             ring.mat.uniforms.uRingPhase.value = ring.phase;
-            ring.mat.uniforms.uColor.value = new THREE.Color().setHSL(
-                MathUtils.clamp(baseHue + ring.hueShift, 0, 1),
-                baseSat * 0.9,
-                baseLight
-            );
+            ring.mat.uniforms.uColor.value.copy(this.displayColor).multiplyScalar(ring.toneScale);
         });
     }
 }
