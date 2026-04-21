@@ -227,20 +227,61 @@
 
     class AudioManager {
         constructor() {
-            this.state = { mel: new Float32Array(64), pitch: 0, loudness: -80, centroid: 900, note: '—', timbre: '—', range: '—', onset: 0, pitchConf: 0 };
-            this.smoothed = { pitch: 220, loud: -80, onset: 0, pitchConf: 0, pitchNorm: 0.5, loudNorm: 0 };
+            this.state = {
+                mel: new Float32Array(64),
+                melHist: [],
+                pitch: 0,
+                pitchHist: [],
+                loudness: -80,
+                loudHist: [],
+                centroid: 900,
+                centroidHist: [],
+                note: '—',
+                timbre: '—',
+                range: '—',
+                onset: 0,
+                onsetHist: [],
+                energy: 0,
+                pitchConf: 0,
+                peaks: []
+            };
+            this.smoothed = {
+                pitch: 220,
+                loud: -80,
+                onset: 0,
+                energy: 0,
+                pitchConf: 0,
+                pitchNorm: 0.5,
+                loudNorm: 0,
+                energyNorm: 0,
+                centroidNorm: 0.25,
+                stability: 0,
+                peakSpread: 0,
+                histPitchNorm: 0.5,
+                histLoudNorm: 0,
+                histOnset: 0
+            };
             this.transientFlash = 0;
             this.lastNote = '—';
         }
         ingestFrame(d) {
             const S = this.state;
+            S.mel = Array.isArray(d.mel) ? Float32Array.from(d.mel) : S.mel;
+            S.melHist = Array.isArray(d.melHist) ? d.melHist : [];
             S.pitch = d.pitch || 0;
+            S.pitchHist = Array.isArray(d.pitchHist) ? d.pitchHist : [];
             S.loudness = d.loudness ?? -80;
+            S.loudHist = Array.isArray(d.loudHist) ? d.loudHist : [];
+            S.centroid = d.centroid ?? 900;
+            S.centroidHist = Array.isArray(d.centroidHist) ? d.centroidHist : [];
             S.note = d.note || '—';
             S.timbre = d.timbre || '—';
             S.range = d.range || '—';
             S.onset = d.onset || 0;
+            S.onsetHist = Array.isArray(d.onsetHist) ? d.onsetHist : [];
+            S.energy = d.energy || 0;
             S.pitchConf = d.pitchConf || 0;
+            S.peaks = Array.isArray(d.peaks) ? d.peaks : [];
 
             if (S.onset > 0.3) this.transientFlash = Math.max(this.transientFlash, S.onset);
             if (S.note !== '—' && S.note !== this.lastNote) {
@@ -251,18 +292,39 @@
         updateSmoothing() {
             const S = this.state;
             const sm = this.smoothed;
-            const targetPitch = (S.pitch > 40) ? S.pitch : 220;
+            const conf = MathUtils.clamp(S.pitchConf, 0, 1);
+            const targetPitch = (S.pitch > 40) ? S.pitch : sm.pitch;
+            const hzToNorm = (hz) =>
+                MathUtils.clamp((Math.log(MathUtils.clamp(hz, 65.4, 2093.0)) - Math.log(65.4)) / (Math.log(2093.0) - Math.log(65.4)), 0, 1);
+            const avg = (arr, fallback = 0) => (arr && arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : fallback);
+            const histPitch = avg(S.pitchHist, targetPitch);
+            const histLoud = avg(S.loudHist, S.loudness);
+            const histOnset = avg(S.onsetHist, S.onset);
+            const peakValues = S.peaks.map((p) => p?.value ?? 0).filter((v) => Number.isFinite(v));
+            const peakBins = S.peaks.map((p) => p?.bin ?? 0).filter((v) => Number.isFinite(v));
+            const spread = peakBins.length > 1 ? (Math.max(...peakBins) - Math.min(...peakBins)) / 63 : 0;
 
-            sm.pitch = MathUtils.lerp(sm.pitch, targetPitch, 0.15);
+            const pitchFollow = MathUtils.lerp(0.04, 0.22, conf * conf);
+            sm.pitch = MathUtils.lerp(sm.pitch, targetPitch, pitchFollow);
             sm.loud = MathUtils.lerp(sm.loud, S.loudness, 0.15);
             sm.onset = MathUtils.lerp(sm.onset, S.onset, 0.4);
-            sm.pitchConf = MathUtils.lerp(sm.pitchConf, S.pitchConf, 0.15);
-            sm.pitchNorm = MathUtils.lerp(
-                sm.pitchNorm,
-                MathUtils.clamp((Math.log(MathUtils.clamp(targetPitch, 80, 1500)) - Math.log(80)) / (Math.log(1500) - Math.log(80)), 0, 1),
-                0.18
-            );
+            sm.energy = MathUtils.lerp(sm.energy, S.energy, 0.2);
+            sm.pitchConf = MathUtils.lerp(sm.pitchConf, conf, 0.18);
+            sm.pitchNorm = MathUtils.lerp(sm.pitchNorm, hzToNorm(sm.pitch), MathUtils.lerp(0.05, 0.22, conf));
             sm.loudNorm = MathUtils.clamp((sm.loud + 58) / 38, 0, 1);
+            sm.energyNorm = MathUtils.clamp(sm.energy, 0, 1);
+            sm.centroidNorm = MathUtils.lerp(sm.centroidNorm, MathUtils.clamp((S.centroid - 250) / 3600, 0, 1), 0.16);
+            sm.stability = MathUtils.lerp(sm.stability, conf, 0.2);
+            sm.peakSpread = MathUtils.lerp(sm.peakSpread, spread, 0.2);
+            sm.histPitchNorm = MathUtils.lerp(sm.histPitchNorm, hzToNorm(histPitch > 40 ? histPitch : sm.pitch), 0.12);
+            sm.histLoudNorm = MathUtils.lerp(sm.histLoudNorm, MathUtils.clamp((histLoud + 58) / 38, 0, 1), 0.12);
+            sm.histOnset = MathUtils.lerp(sm.histOnset, MathUtils.clamp(histOnset, 0, 1), 0.22);
+
+            const peakIntensity = peakValues.length ? avg(peakValues, 0) : 0;
+            if (S.onset > 0.22 || peakIntensity > 0.42) {
+                const peakFlash = MathUtils.clamp(0.45 * S.onset + 0.55 * peakIntensity, 0, 1);
+                this.transientFlash = Math.max(this.transientFlash, peakFlash);
+            }
         }
         update(dt) {
             this.updateSmoothing();
