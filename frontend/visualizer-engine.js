@@ -15,7 +15,16 @@ const VISUAL_SCENE_CONFIG = {
     ringGlow: 0.7,
     ringOpacity: 0.8,
     ringEchoCount: 4,
-    axisOpacity: 0.22
+    axisOpacity: 0.22,
+    ringStackNearOffset: 0.42,
+    ringStackFarOffset: 0.84,
+    ringMainOpacityLead: 1.0,
+    ringNearOpacity: 0.72,
+    ringFarOpacity: 0.56,
+    ringAttack: 0.2,
+    ringRelease: 0.075,
+    ringYOffsetAttack: 0.17,
+    ringYOffsetRelease: 0.07
 };
 
 class BackgroundSystem {
@@ -110,9 +119,17 @@ class RingSystem {
     }
 
     _createRings(scene) {
-        const offsets = [0, 0.75, 1.5, -0.75, -1.5];
-        const opacityScale = [1.0, 0.72, 0.5, 0.72, 0.5];
-        const radiusScale = [1.0, 0.92, 0.84, 0.92, 0.84];
+        const nearOffset = VISUAL_SCENE_CONFIG.ringStackNearOffset;
+        const farOffset = VISUAL_SCENE_CONFIG.ringStackFarOffset;
+        const offsets = [0, nearOffset, farOffset, -nearOffset, -farOffset];
+        const opacityScale = [
+            VISUAL_SCENE_CONFIG.ringMainOpacityLead,
+            VISUAL_SCENE_CONFIG.ringNearOpacity,
+            VISUAL_SCENE_CONFIG.ringFarOpacity,
+            VISUAL_SCENE_CONFIG.ringNearOpacity,
+            VISUAL_SCENE_CONFIG.ringFarOpacity
+        ];
+        const radiusScale = [1.0, 0.94, 0.88, 0.94, 0.88];
 
         for (let i = 0; i < offsets.length; i++) {
             const mat = this._createRingMaterial();
@@ -127,7 +144,8 @@ class RingSystem {
                 mat,
                 yOffset: offsets[i],
                 radiusScale: radiusScale[i],
-                hueShift: i === 0 ? 0 : (offsets[i] > 0 ? 0.03 : -0.03)
+                opacityScale: opacityScale[i],
+                hueShift: i === 0 ? 0 : (offsets[i] > 0 ? 0.02 : -0.02)
             });
         }
     }
@@ -142,25 +160,35 @@ class RingSystem {
         const thicknessBase = MathUtils.lerp(0.035, 0.078, liveState?.stability ?? 0);
         const opacityBase = VISUAL_SCENE_CONFIG.ringOpacity * MathUtils.lerp(0.5, 1.0, liveState?.stability ?? 0);
 
-        this.displayY = MathUtils.lerp(this.displayY, targetY, voiced ? (liveState.followY ?? 0.16) : 0.08);
-        this.displayRadius = MathUtils.lerp(this.displayRadius, targetRadius, voiced ? 0.14 : 0.08);
-        this.displayFlash = MathUtils.lerp(this.displayFlash, targetFlash, 0.25);
+        const yFollow = voiced
+            ? (targetY > this.displayY ? VISUAL_SCENE_CONFIG.ringYOffsetAttack : VISUAL_SCENE_CONFIG.ringYOffsetRelease)
+            : VISUAL_SCENE_CONFIG.ringYOffsetRelease;
+        const radiusFollow = targetRadius > this.displayRadius
+            ? VISUAL_SCENE_CONFIG.ringAttack
+            : VISUAL_SCENE_CONFIG.ringRelease;
+
+        this.displayY = MathUtils.lerp(this.displayY, targetY, Math.max(liveState.followY ?? 0.16, yFollow));
+        this.displayRadius = MathUtils.lerp(this.displayRadius, targetRadius, radiusFollow);
+        this.displayFlash = MathUtils.lerp(this.displayFlash, targetFlash, 0.22);
 
         const baseHue = (liveState?.pitchNorm ?? 0.5) * 0.38 + 0.02;
         const baseSat = MathUtils.lerp(0.58, 0.76, liveState?.sisterRichness ?? 0);
         const baseLight = MathUtils.lerp(0.40, 0.52, liveState?.centroidNorm ?? 0.2);
         this.displayColor.lerp(new THREE.Color().setHSL(baseHue, baseSat, baseLight), 0.12);
 
+        const sisterCoupling = MathUtils.lerp(0.96, 1.0, liveState?.sisterRichness ?? 0);
+        this.beam.position.y = this.displayY;
+
         this.rings.forEach((ring, idx) => {
             ring.mesh.position.y = this.displayY + ring.yOffset;
-            const sisterScale = idx === 0 ? 1.0 : MathUtils.lerp(0.92, 1.12, liveState?.sisterRichness ?? 0);
-            ring.mat.uniforms.uRadius.value = this.displayRadius * ring.radiusScale * sisterScale;
+            const coupledScale = idx === 0 ? 1.0 : sisterCoupling;
+            ring.mat.uniforms.uRadius.value = this.displayRadius * ring.radiusScale * coupledScale;
             ring.mat.uniforms.uFlash.value = this.displayFlash;
-            ring.mat.uniforms.uThickness.value = thicknessBase * (idx === 0 ? 1.0 : 0.88);
-            ring.mat.uniforms.uOpacity.value = opacityBase * (idx === 0 ? 1.0 : MathUtils.lerp(0.58, 0.84, liveState?.sisterRichness ?? 0));
+            ring.mat.uniforms.uThickness.value = thicknessBase * (idx === 0 ? 1.0 : 0.9);
+            ring.mat.uniforms.uOpacity.value = opacityBase * ring.opacityScale;
             ring.mat.uniforms.uColor.value = new THREE.Color().setHSL(
                 MathUtils.clamp(baseHue + ring.hueShift, 0, 1),
-                baseSat * 0.92,
+                baseSat * 0.9,
                 baseLight
             );
         });
