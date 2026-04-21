@@ -30,6 +30,9 @@ const VISUAL_SCENE_CONFIG = {
     ringContourDepth: 0.075,
     ringDepthStagger: 0.22,
     ringTiltMax: 0.09,
+    ringShellDepthStep: 0.05,
+    ringMainShellBoost: 1.0,
+    ringSisterShellBoost: 0.78,
     verticalColorSmoothing: 0.11,
     verticalColorPitchMinY: -3.8,
     verticalColorPitchMaxY: 3.8,
@@ -129,7 +132,15 @@ class RingSystem {
                 uHaloOpacity: { value: VISUAL_SCENE_CONFIG.ringHaloOpacity },
                 uDepthBias: { value: 0.0 },
                 uHardness: { value: 0.45 },
-                uHarmonicRichness: { value: 0.25 }
+                uHarmonicRichness: { value: 0.25 },
+                uLayerRole: { value: 0.0 },
+                uLayerMix: { value: new THREE.Vector4(0.7, 0.85, 0.22, 0.12) },
+                uPeakShape: { value: new THREE.Vector4(0.0, 0.0, 0.0, 0.0) },
+                uPeakWeights: { value: new THREE.Vector4(0.0, 0.0, 0.0, 0.0) },
+                uMelBands: { value: new THREE.Vector4(0.25, 0.2, 0.18, 0.12) },
+                uPitchTightness: { value: 0.7 },
+                uOnsetExcite: { value: 0.0 },
+                uShellDepth: { value: 0.0 }
             },
             vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
             fragmentShader: `
@@ -150,17 +161,32 @@ class RingSystem {
                 uniform float uDepthBias;
                 uniform float uHardness;
                 uniform float uHarmonicRichness;
+                uniform float uLayerRole;
+                uniform vec4 uLayerMix;
+                uniform vec4 uPeakShape;
+                uniform vec4 uPeakWeights;
+                uniform vec4 uMelBands;
+                uniform float uPitchTightness;
+                uniform float uOnsetExcite;
+                uniform float uShellDepth;
 
                 void main() {
                     vec2 uv = vUv * 2.0 - 1.0;
                     uv.x *= 1.08;
                     float theta = atan(uv.y, uv.x);
-                    // Harmonic contour: peaks drive the amount of local ring deformation.
+                    float p0 = sin(theta * (3.0 + uPeakShape.x * 9.0) + uRingPhase * 0.8 + uTime * 0.45);
+                    float p1 = sin(theta * (5.0 + uPeakShape.y * 11.0) + uRingPhase * 1.2 + uTime * 0.35);
+                    float p2 = sin(theta * (8.0 + uPeakShape.z * 15.0) - uRingPhase * 0.7 + uTime * 0.25);
+                    float peakContour = p0 * uPeakWeights.x + p1 * uPeakWeights.y + p2 * uPeakWeights.z;
                     float harmonicA = sin(theta * (4.0 + uHarmonicRichness * 5.0) + uTime * 1.1 + uRingPhase);
                     float harmonicB = sin(theta * (8.0 + uHarmonicRichness * 8.0) - uTime * 0.8 + uRingPhase * 1.7);
+                    float melTexturing = sin(theta * (14.0 + uMelBands.x * 10.0) + uTime * 0.18) * uMelBands.y;
+                    float onsetPulse = (sin(theta * 2.0 - uTime * 1.7) * 0.5 + 0.5) * uOnsetExcite;
+                    float tighten = mix(0.25, 1.0, uPitchTightness);
                     float rippleA = harmonicA * uVariation;
                     float rippleB = harmonicB * (uContour * 0.65);
-                    float contourWarp = 1.0 + rippleA * 0.03 + rippleB * 0.02;
+                    float structuredWarp = peakContour * (0.045 * tighten) + melTexturing * 0.02 + onsetPulse * 0.015;
+                    float contourWarp = 1.0 + (rippleA * 0.02 + rippleB * 0.015 + structuredWarp) * (0.8 + uLayerRole * 0.4);
                     float dist = length(uv) * 4.0 * contourWarp;
                     float ringDist = abs(dist - uRadius);
 
@@ -173,24 +199,27 @@ class RingSystem {
                     float sisterStroke = exp(-pow((ringDist - uThickness * uLayerLift) / (uThickness * 1.2), 2.0));
                     float coreStroke = exp(-pow((ringDist + uThickness * 0.28) / (uThickness * 0.72), 2.0));
                     float depthBand = smoothstep(-0.25, 0.75, uv.y + uDepthBias * 0.9);
+                    float shellDepthBand = smoothstep(-0.65, 0.8, uv.y + uShellDepth * 1.4);
 
                     float layeredAlpha =
-                        inner * 0.36 +
-                        mid * 0.36 +
-                        outer * 0.17 +
-                        halo * uHaloOpacity +
-                        sisterStroke * 0.14 +
-                        coreStroke * 0.10;
+                        inner * uLayerMix.x +
+                        mid * uLayerMix.y * 0.46 +
+                        outer * uLayerMix.z +
+                        halo * uHaloOpacity * uLayerMix.z +
+                        sisterStroke * uLayerMix.w +
+                        coreStroke * (0.08 + uLayerMix.x * 0.14);
                     float alpha = layeredAlpha * uOpacity;
                     vec3 flashMix = mix(uColor, vec3(1.0, 0.94, 0.82), clamp(uFlash * 0.35, 0.0, 0.35));
                     vec3 edgeWarm = vec3(1.0, 0.93, 0.80);
                     vec3 coreColor = mix(flashMix, edgeWarm, clamp(coreStroke * 0.5 + uFlash * 0.2, 0.0, 0.55));
                     vec3 haloTint = mix(flashMix, vec3(0.72, 0.82, 0.95), clamp(uBandBias * 0.45, 0.0, 0.45));
                     vec3 depthTint = mix(vec3(0.84, 0.74, 0.58), vec3(0.68, 0.82, 0.95), depthBand * uBandBias);
+                    vec3 shellTint = mix(vec3(0.94, 0.86, 0.72), vec3(0.66, 0.84, 0.96), shellDepthBand * (0.5 + uBandBias * 0.4));
                     vec3 color =
-                        coreColor * (0.54 + uGlow * 0.22 + mid * 0.24) +
-                        haloTint * (halo * 0.22 + sisterStroke * 0.14) +
-                        depthTint * (halo * 0.12 + outer * 0.08);
+                        coreColor * (0.42 + uGlow * 0.24 + mid * 0.26 + uLayerRole * 0.08) +
+                        haloTint * (halo * 0.2 + sisterStroke * 0.16 + uLayerMix.w * 0.08) +
+                        depthTint * (halo * 0.12 + outer * 0.1) +
+                        shellTint * (outer * 0.11 + uOnsetExcite * 0.06);
                     gl_FragColor = vec4(color, alpha);
                 }`
         });
@@ -222,18 +251,34 @@ class RingSystem {
             VISUAL_SCENE_CONFIG.ringFarOpacity
         ];
         const radiusScale = [1.0, 0.94, 0.88, 0.94, 0.88];
+        const shellProfiles = [
+            { role: 0.0, mix: [0.92, 1.05, 0.15, 0.08], thickness: 0.92, opacity: 1.0, radius: 1.0, lift: 0.9, depth: -0.2 },
+            { role: 0.35, mix: [0.68, 0.95, 0.26, 0.12], thickness: 1.18, opacity: 0.82, radius: 1.02, lift: 1.0, depth: 0.0 },
+            { role: 0.7, mix: [0.32, 0.6, 0.5, 0.18], thickness: 1.45, opacity: 0.58, radius: 1.05, lift: 1.2, depth: 0.22 },
+            { role: 0.95, mix: [0.22, 0.42, 0.62, 0.24], thickness: 1.72, opacity: 0.36, radius: 1.08, lift: 1.32, depth: 0.36 }
+        ];
 
         for (let i = 0; i < offsets.length; i++) {
-            const mat = this._createRingMaterial();
-            mat.uniforms.uOpacity.value = VISUAL_SCENE_CONFIG.ringOpacity * opacityScale[i];
+            const group = new THREE.Group();
+            scene.add(group);
+            const shells = shellProfiles.map((shell) => {
+                const mat = this._createRingMaterial();
+                mat.uniforms.uLayerRole.value = shell.role;
+                mat.uniforms.uLayerMix.value.set(shell.mix[0], shell.mix[1], shell.mix[2], shell.mix[3]);
+                mat.uniforms.uLayerLift.value = VISUAL_SCENE_CONFIG.ringLayerLift * shell.lift;
+                mat.uniforms.uOpacity.value = VISUAL_SCENE_CONFIG.ringOpacity * opacityScale[i] * shell.opacity;
+                mat.uniforms.uShellDepth.value = shell.depth;
 
-            const mesh = new THREE.Mesh(new THREE.PlaneGeometry(12, 12), mat);
-            mesh.rotation.x = -Math.PI / 2;
-            scene.add(mesh);
+                const mesh = new THREE.Mesh(new THREE.PlaneGeometry(12, 12), mat);
+                mesh.rotation.x = -Math.PI / 2;
+                mesh.position.z = shell.depth * VISUAL_SCENE_CONFIG.ringShellDepthStep * (i === 0 ? VISUAL_SCENE_CONFIG.ringMainShellBoost : VISUAL_SCENE_CONFIG.ringSisterShellBoost);
+                group.add(mesh);
+                return { mesh, mat, shell };
+            });
 
             this.rings.push({
-                mesh,
-                mat,
+                group,
+                shells,
                 yOffset: offsets[i],
                 radiusScale: radiusScale[i],
                 opacityScale: opacityScale[i],
@@ -277,6 +322,11 @@ class RingSystem {
         const harmonicRichness = liveState?.harmonicRichness ?? 0.2;
         const depthBias = liveState?.depthBias ?? 0;
         const hardness = liveState?.surfaceHardness ?? 0.45;
+        const onsetExcite = liveState?.onsetExcite ?? 0;
+        const pitchTightness = liveState?.pitchConf ?? 0.5;
+        const melBands = liveState?.melBands ?? [0.25, 0.2, 0.16, 0.12];
+        const peakShape = liveState?.peakShape ?? [0.1, 0.2, 0.3, 0.0];
+        const peakWeights = liveState?.peakWeights ?? [0.35, 0.25, 0.2, 0.0];
         this.displayColor.lerp(targetColor, VISUAL_SCENE_CONFIG.verticalColorSmoothing);
 
         const sisterCoupling = MathUtils.lerp(0.96, 1.0, liveState?.sisterRichness ?? 0);
@@ -284,23 +334,30 @@ class RingSystem {
         this.beam.material.color.copy(this.displayColor).multiplyScalar(0.92);
 
         this.rings.forEach((ring, idx) => {
-            ring.mesh.position.y = this.displayY + ring.yOffset;
-            ring.mesh.position.z = (idx - 2) * VISUAL_SCENE_CONFIG.ringDepthStagger * (liveState?.depthSpread ?? 0.35);
-            ring.mesh.rotation.z = (idx - 2) * (liveState?.ringTilt ?? 0.0);
+            ring.group.position.y = this.displayY + ring.yOffset;
+            ring.group.position.z = (idx - 2) * VISUAL_SCENE_CONFIG.ringDepthStagger * (liveState?.depthSpread ?? 0.35);
+            ring.group.rotation.z = (idx - 2) * (liveState?.ringTilt ?? 0.0);
             const coupledScale = idx === 0 ? 1.0 : sisterCoupling;
-            ring.mat.uniforms.uRadius.value = this.displayRadius * ring.radiusScale * coupledScale;
-            ring.mat.uniforms.uFlash.value = this.displayFlash;
-            ring.mat.uniforms.uThickness.value = thicknessBase * (idx === 0 ? 1.0 : 0.9);
-            ring.mat.uniforms.uOpacity.value = opacityBase * ring.opacityScale;
-            ring.mat.uniforms.uTime.value += 0.016;
-            ring.mat.uniforms.uVariation.value = variation * (idx === 0 ? 1.0 : 0.82);
-            ring.mat.uniforms.uContour.value = contour;
-            ring.mat.uniforms.uBandBias.value = liveState?.centroidNorm ?? 0.2;
-            ring.mat.uniforms.uRingPhase.value = ring.phase;
-            ring.mat.uniforms.uDepthBias.value = depthBias * (idx === 0 ? 1.0 : 0.72);
-            ring.mat.uniforms.uHardness.value = hardness;
-            ring.mat.uniforms.uHarmonicRichness.value = harmonicRichness;
-            ring.mat.uniforms.uColor.value.copy(this.displayColor).multiplyScalar(ring.toneScale);
+            ring.shells.forEach(({ mat, shell }, shellIdx) => {
+                mat.uniforms.uRadius.value = this.displayRadius * ring.radiusScale * coupledScale * shell.radius;
+                mat.uniforms.uFlash.value = this.displayFlash;
+                mat.uniforms.uThickness.value = thicknessBase * (idx === 0 ? 1.0 : 0.9) * shell.thickness;
+                mat.uniforms.uOpacity.value = opacityBase * ring.opacityScale * shell.opacity;
+                mat.uniforms.uTime.value += 0.016;
+                mat.uniforms.uVariation.value = variation * (idx === 0 ? 1.0 : 0.82);
+                mat.uniforms.uContour.value = contour;
+                mat.uniforms.uBandBias.value = liveState?.centroidNorm ?? 0.2;
+                mat.uniforms.uRingPhase.value = ring.phase + shellIdx * 0.14;
+                mat.uniforms.uDepthBias.value = depthBias * (idx === 0 ? 1.0 : 0.72);
+                mat.uniforms.uHardness.value = hardness;
+                mat.uniforms.uHarmonicRichness.value = harmonicRichness;
+                mat.uniforms.uOnsetExcite.value = onsetExcite * (1.0 - shellIdx * 0.14);
+                mat.uniforms.uPitchTightness.value = pitchTightness;
+                mat.uniforms.uMelBands.value.set(melBands[0], melBands[1], melBands[2], melBands[3]);
+                mat.uniforms.uPeakShape.value.set(peakShape[0], peakShape[1], peakShape[2], peakShape[3]);
+                mat.uniforms.uPeakWeights.value.set(peakWeights[0], peakWeights[1], peakWeights[2], peakWeights[3]);
+                mat.uniforms.uColor.value.copy(this.displayColor).multiplyScalar(ring.toneScale * (1.0 - shellIdx * 0.05));
+            });
         });
     }
 }
@@ -360,6 +417,36 @@ class VisualizerEngine {
         };
     }
 
+    _analyzePeaks(peaks, pitchConf) {
+        if (!peaks || !peaks.length) {
+            return {
+                shape: [0.08, 0.18, 0.3, 0.0],
+                weights: [0.2, 0.13, 0.1, 0.0],
+                spread: 0.0
+            };
+        }
+        const sorted = [...peaks]
+            .filter((p) => Number.isFinite(p?.value) && Number.isFinite(p?.bin))
+            .sort((a, b) => (b.value ?? 0) - (a.value ?? 0))
+            .slice(0, 3);
+        const total = Math.max(0.001, sorted.reduce((acc, p) => acc + Math.max(0, p.value ?? 0), 0));
+        const shape = [0, 0, 0, 0];
+        const weights = [0, 0, 0, 0];
+        for (let i = 0; i < 3; i++) {
+            const p = sorted[i] ?? { bin: i * 8, value: 0 };
+            shape[i] = MathUtils.clamp((p.bin ?? 0) / 64, 0, 1);
+            weights[i] = MathUtils.clamp((p.value ?? 0) / total, 0, 1);
+        }
+        const bins = sorted.map((p) => p.bin ?? 0);
+        const spread = bins.length > 1 ? MathUtils.clamp((Math.max(...bins) - Math.min(...bins)) / 64, 0, 1) : 0;
+        const confGain = MathUtils.lerp(0.28, 1.0, MathUtils.clamp(pitchConf, 0, 1));
+        return {
+            shape,
+            weights: weights.map((w) => w * confGain),
+            spread
+        };
+    }
+
     buildLiveState() {
         const sm = this.audio.smoothed;
         const S = this.audio.state;
@@ -387,6 +474,14 @@ class VisualizerEngine {
             Brilliant: 0.82
         }[S?.timbre] ?? 0.5);
         const depthBias = MathUtils.clamp((sm.centroidNorm - 0.5) * 2.0, -1, 1);
+        const peakAnalysis = this._analyzePeaks(S?.peaks, conf);
+        const melBands = [
+            MathUtils.clamp(melStats.lowMidLift, 0, 1),
+            MathUtils.clamp(melStats.presence, 0, 1),
+            MathUtils.clamp(0.5 * melStats.motion + 0.5 * sm.centroidNorm, 0, 1),
+            MathUtils.clamp(0.55 * sm.histOnset + 0.45 * transient, 0, 1)
+        ];
+        const onsetExcite = MathUtils.clamp(0.7 * transient + 0.3 * sm.histOnset, 0, 1);
 
         return {
             active: sm.pitch > 40 && conf > 0.08,
@@ -401,8 +496,13 @@ class VisualizerEngine {
             peakSpread: sm.peakSpread,
             melPresence: melStats.presence,
             harmonicRichness,
+            peakShape: peakAnalysis.shape,
+            peakWeights: peakAnalysis.weights,
+            melBands,
+            onsetExcite,
+            pitchConf: conf,
             depthBias,
-            depthSpread: MathUtils.clamp(0.22 + 0.5 * melStats.motion + 0.28 * centroidSwing, 0, 1),
+            depthSpread: MathUtils.clamp(0.2 + 0.4 * melStats.motion + 0.22 * centroidSwing + 0.18 * peakAnalysis.spread, 0, 1),
             ringTilt: MathUtils.lerp(-VISUAL_SCENE_CONFIG.ringTiltMax, VISUAL_SCENE_CONFIG.ringTiltMax, sm.centroidNorm),
             surfaceHardness: MathUtils.clamp(0.45 * conf + 0.35 * timbreSoftness + 0.2 * (1 - sm.histOnset), 0.2, 0.95)
         };
