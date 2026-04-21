@@ -28,6 +28,8 @@ const VISUAL_SCENE_CONFIG = {
     ringLayerLift: 0.055,
     ringHaloOpacity: 0.32,
     ringContourDepth: 0.075,
+    ringDepthStagger: 0.22,
+    ringTiltMax: 0.09,
     verticalColorSmoothing: 0.11,
     verticalColorPitchMinY: -3.8,
     verticalColorPitchMaxY: 3.8,
@@ -124,7 +126,10 @@ class RingSystem {
                 uLayerLift: { value: VISUAL_SCENE_CONFIG.ringLayerLift },
                 uBandBias: { value: 0.0 },
                 uRingPhase: { value: 0.0 },
-                uHaloOpacity: { value: VISUAL_SCENE_CONFIG.ringHaloOpacity }
+                uHaloOpacity: { value: VISUAL_SCENE_CONFIG.ringHaloOpacity },
+                uDepthBias: { value: 0.0 },
+                uHardness: { value: 0.45 },
+                uHarmonicRichness: { value: 0.25 }
             },
             vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
             fragmentShader: `
@@ -142,23 +147,32 @@ class RingSystem {
                 uniform float uBandBias;
                 uniform float uRingPhase;
                 uniform float uHaloOpacity;
+                uniform float uDepthBias;
+                uniform float uHardness;
+                uniform float uHarmonicRichness;
 
                 void main() {
                     vec2 uv = vUv * 2.0 - 1.0;
                     uv.x *= 1.08;
                     float theta = atan(uv.y, uv.x);
-                    float rippleA = sin(theta * 4.0 + uTime * 1.1 + uRingPhase) * uVariation;
-                    float rippleB = sin(theta * 9.0 - uTime * 0.8 + uRingPhase * 1.7) * (uContour * 0.65);
+                    // Harmonic contour: peaks drive the amount of local ring deformation.
+                    float harmonicA = sin(theta * (4.0 + uHarmonicRichness * 5.0) + uTime * 1.1 + uRingPhase);
+                    float harmonicB = sin(theta * (8.0 + uHarmonicRichness * 8.0) - uTime * 0.8 + uRingPhase * 1.7);
+                    float rippleA = harmonicA * uVariation;
+                    float rippleB = harmonicB * (uContour * 0.65);
                     float contourWarp = 1.0 + rippleA * 0.03 + rippleB * 0.02;
                     float dist = length(uv) * 4.0 * contourWarp;
                     float ringDist = abs(dist - uRadius);
 
-                    float inner = smoothstep(uThickness * 1.3, uThickness * 0.33, ringDist);
-                    float mid = exp(-pow(ringDist / (uThickness * 0.9), 2.0));
-                    float outer = exp(-pow(ringDist / (uThickness * 1.9), 2.0));
+                    float innerSharp = mix(1.45, 0.95, uHardness);
+                    float innerSoft = mix(0.26, 0.4, uHardness);
+                    float inner = smoothstep(uThickness * innerSharp, uThickness * innerSoft, ringDist);
+                    float mid = exp(-pow(ringDist / (uThickness * mix(1.05, 0.8, uHardness)), 2.0));
+                    float outer = exp(-pow(ringDist / (uThickness * mix(2.2, 1.7, uHardness)), 2.0));
                     float halo = exp(-pow(ringDist / (uThickness * 2.8), 2.0));
                     float sisterStroke = exp(-pow((ringDist - uThickness * uLayerLift) / (uThickness * 1.2), 2.0));
                     float coreStroke = exp(-pow((ringDist + uThickness * 0.28) / (uThickness * 0.72), 2.0));
+                    float depthBand = smoothstep(-0.25, 0.75, uv.y + uDepthBias * 0.9);
 
                     float layeredAlpha =
                         inner * 0.36 +
@@ -171,10 +185,12 @@ class RingSystem {
                     vec3 flashMix = mix(uColor, vec3(1.0, 0.94, 0.82), clamp(uFlash * 0.35, 0.0, 0.35));
                     vec3 edgeWarm = vec3(1.0, 0.93, 0.80);
                     vec3 coreColor = mix(flashMix, edgeWarm, clamp(coreStroke * 0.5 + uFlash * 0.2, 0.0, 0.55));
-                    vec3 haloTint = mix(flashMix, vec3(0.72, 0.82, 0.95), clamp(uBandBias * 0.35, 0.0, 0.35));
+                    vec3 haloTint = mix(flashMix, vec3(0.72, 0.82, 0.95), clamp(uBandBias * 0.45, 0.0, 0.45));
+                    vec3 depthTint = mix(vec3(0.84, 0.74, 0.58), vec3(0.68, 0.82, 0.95), depthBand * uBandBias);
                     vec3 color =
                         coreColor * (0.54 + uGlow * 0.22 + mid * 0.24) +
-                        haloTint * (halo * 0.22 + sisterStroke * 0.14);
+                        haloTint * (halo * 0.22 + sisterStroke * 0.14) +
+                        depthTint * (halo * 0.12 + outer * 0.08);
                     gl_FragColor = vec4(color, alpha);
                 }`
         });
@@ -258,6 +274,9 @@ class RingSystem {
         const targetColor = this._sampleVerticalPalette(verticalNorm);
         const contour = MathUtils.lerp(VISUAL_SCENE_CONFIG.ringContourDepth, 0.16, liveState?.peakSpread ?? 0);
         const variation = MathUtils.lerp(0.08, 0.42, liveState?.melPresence ?? 0);
+        const harmonicRichness = liveState?.harmonicRichness ?? 0.2;
+        const depthBias = liveState?.depthBias ?? 0;
+        const hardness = liveState?.surfaceHardness ?? 0.45;
         this.displayColor.lerp(targetColor, VISUAL_SCENE_CONFIG.verticalColorSmoothing);
 
         const sisterCoupling = MathUtils.lerp(0.96, 1.0, liveState?.sisterRichness ?? 0);
@@ -266,6 +285,8 @@ class RingSystem {
 
         this.rings.forEach((ring, idx) => {
             ring.mesh.position.y = this.displayY + ring.yOffset;
+            ring.mesh.position.z = (idx - 2) * VISUAL_SCENE_CONFIG.ringDepthStagger * (liveState?.depthSpread ?? 0.35);
+            ring.mesh.rotation.z = (idx - 2) * (liveState?.ringTilt ?? 0.0);
             const coupledScale = idx === 0 ? 1.0 : sisterCoupling;
             ring.mat.uniforms.uRadius.value = this.displayRadius * ring.radiusScale * coupledScale;
             ring.mat.uniforms.uFlash.value = this.displayFlash;
@@ -276,6 +297,9 @@ class RingSystem {
             ring.mat.uniforms.uContour.value = contour;
             ring.mat.uniforms.uBandBias.value = liveState?.centroidNorm ?? 0.2;
             ring.mat.uniforms.uRingPhase.value = ring.phase;
+            ring.mat.uniforms.uDepthBias.value = depthBias * (idx === 0 ? 1.0 : 0.72);
+            ring.mat.uniforms.uHardness.value = hardness;
+            ring.mat.uniforms.uHarmonicRichness.value = harmonicRichness;
             ring.mat.uniforms.uColor.value.copy(this.displayColor).multiplyScalar(ring.toneScale);
         });
     }
@@ -299,42 +323,88 @@ class VisualizerEngine {
         this.animate();
     }
 
+    _average(arr, fallback = 0) {
+        return (arr && arr.length) ? arr.reduce((a, b) => a + b, 0) / arr.length : fallback;
+    }
+
+    _analyzeMel(mel, melHist) {
+        if (!mel || !mel.length) {
+            return { presence: 0.3, lowMidLift: 0.3, motion: 0.0 };
+        }
+        const len = mel.length;
+        const lowEnd = Math.max(1, Math.floor(len * 0.35));
+        const midStart = Math.floor(len * 0.28);
+        const midEnd = Math.floor(len * 0.72);
+        const highStart = Math.min(len - 1, Math.floor(len * 0.65));
+        let low = 0;
+        let mid = 0;
+        let high = 0;
+        for (let i = 0; i < lowEnd; i++) low += mel[i];
+        for (let i = midStart; i < midEnd; i++) mid += mel[i];
+        for (let i = highStart; i < len; i++) high += mel[i];
+        low /= lowEnd;
+        mid /= Math.max(1, midEnd - midStart);
+        high /= Math.max(1, len - highStart);
+
+        // melHist is used for spectral-memory motion only (no decorative trails).
+        const prev = (melHist && melHist.length) ? melHist[melHist.length - 1] : null;
+        let motion = 0;
+        if (prev && prev.length === len) {
+            for (let i = 0; i < len; i++) motion += Math.abs((mel[i] ?? 0) - (prev[i] ?? 0));
+            motion = MathUtils.clamp(motion / len * 1.4, 0, 1);
+        }
+        return {
+            presence: MathUtils.clamp(0.48 * low + 0.34 * mid + 0.18 * high, 0, 1),
+            lowMidLift: MathUtils.clamp(0.65 * low + 0.35 * mid, 0, 1),
+            motion
+        };
+    }
+
     buildLiveState() {
         const sm = this.audio.smoothed;
-        const mel = this.audio.state?.mel;
+        const S = this.audio.state;
+        const mel = S?.mel;
         const conf = MathUtils.clamp(sm.pitchConf, 0, 1);
         const pitchMix = MathUtils.lerp(sm.histPitchNorm, sm.pitchNorm, conf);
         const loudMix = MathUtils.clamp(0.56 * sm.loudNorm + 0.34 * sm.energyNorm + 0.10 * sm.histLoudNorm, 0, 1);
-        let melPresence = 0.35;
-        if (mel && mel.length) {
-            const len = mel.length;
-            const lowEnd = Math.max(1, Math.floor(len * 0.35));
-            const highStart = Math.min(len - 1, Math.floor(len * 0.55));
-            let low = 0;
-            let high = 0;
-            for (let i = 0; i < lowEnd; i++) low += mel[i];
-            for (let i = highStart; i < len; i++) high += mel[i];
-            low = low / lowEnd;
-            high = high / Math.max(1, len - highStart);
-            melPresence = MathUtils.clamp(0.58 * low + 0.42 * high, 0, 1);
-        }
+        const melStats = this._analyzeMel(mel, S?.melHist);
         const yFromPitch = -3.8 + pitchMix * 7.6;
         const memoryOffset = (sm.histPitchNorm - sm.pitchNorm) * 0.7;
         const transient = MathUtils.clamp(this.audio.transientFlash * 0.75 + sm.histOnset * 0.35, 0, 1);
         const sisterRichness = MathUtils.clamp(0.6 * sm.peakSpread + 0.4 * sm.centroidNorm, 0, 1);
+        const peakVals = (S?.peaks || []).map((p) => p?.value ?? 0).filter((v) => Number.isFinite(v));
+        const peakBins = (S?.peaks || []).map((p) => p?.bin ?? 0).filter((v) => Number.isFinite(v));
+        const peakMean = peakVals.length ? this._average(peakVals, 0) : 0;
+        const peakCluster = peakBins.length ? MathUtils.clamp(1 - (Math.max(...peakBins) - Math.min(...peakBins)) / 63, 0, 1) : 0;
+        const harmonicRichness = MathUtils.clamp(0.65 * peakMean + 0.35 * (1 - peakCluster), 0, 1);
+        const centroidHistAvg = this._average(S?.centroidHist, S?.centroid ?? 900);
+        const centroidMemory = MathUtils.clamp((centroidHistAvg - 250) / 3600, 0, 1);
+        const centroidSwing = MathUtils.clamp(Math.abs((sm.centroidNorm ?? 0) - centroidMemory) * 1.8, 0, 1);
+        const timbreSoftness = ({
+            Dark: 0.28,
+            Warm: 0.42,
+            Bright: 0.66,
+            Brilliant: 0.82
+        }[S?.timbre] ?? 0.5);
+        const depthBias = MathUtils.clamp((sm.centroidNorm - 0.5) * 2.0, -1, 1);
 
         return {
             active: sm.pitch > 40 && conf > 0.08,
             y: yFromPitch + memoryOffset * 0.35,
             followY: MathUtils.lerp(0.05, 0.2, conf),
             pitchNorm: pitchMix,
-            radius: 0.82 + loudMix * 1.75 + transient * 0.2,
+            radius: 0.82 + loudMix * 1.75 + transient * 0.2 + melStats.lowMidLift * 0.08,
             transient,
             stability: conf,
             sisterRichness,
             centroidNorm: sm.centroidNorm,
             peakSpread: sm.peakSpread,
-            melPresence
+            melPresence: melStats.presence,
+            harmonicRichness,
+            depthBias,
+            depthSpread: MathUtils.clamp(0.22 + 0.5 * melStats.motion + 0.28 * centroidSwing, 0, 1),
+            ringTilt: MathUtils.lerp(-VISUAL_SCENE_CONFIG.ringTiltMax, VISUAL_SCENE_CONFIG.ringTiltMax, sm.centroidNorm),
+            surfaceHardness: MathUtils.clamp(0.45 * conf + 0.35 * timbreSoftness + 0.2 * (1 - sm.histOnset), 0.2, 0.95)
         };
     }
 
