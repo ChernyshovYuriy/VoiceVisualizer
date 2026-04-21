@@ -242,19 +242,32 @@
             S.onset = d.onset || 0;
             S.pitchConf = d.pitchConf || 0;
 
-            const targetPitch = (S.pitch > 40) ? S.pitch : 220;
+            if (S.onset > 0.3) this.transientFlash = Math.max(this.transientFlash, S.onset);
+            if (S.note !== '—' && S.note !== this.lastNote) {
+                this.transientFlash = 1;
+                this.lastNote = S.note;
+            }
+        }
+        updateSmoothing() {
+            const S = this.state;
             const sm = this.smoothed;
+            const targetPitch = (S.pitch > 40) ? S.pitch : 220;
+
             sm.pitch = MathUtils.lerp(sm.pitch, targetPitch, 0.15);
             sm.loud = MathUtils.lerp(sm.loud, S.loudness, 0.15);
             sm.onset = MathUtils.lerp(sm.onset, S.onset, 0.4);
             sm.pitchConf = MathUtils.lerp(sm.pitchConf, S.pitchConf, 0.15);
-            sm.pitchNorm = MathUtils.lerp(sm.pitchNorm, MathUtils.clamp((Math.log(MathUtils.clamp(targetPitch, 80, 1500)) - Math.log(80)) / (Math.log(1500) - Math.log(80)), 0, 1), 0.18);
+            sm.pitchNorm = MathUtils.lerp(
+                sm.pitchNorm,
+                MathUtils.clamp((Math.log(MathUtils.clamp(targetPitch, 80, 1500)) - Math.log(80)) / (Math.log(1500) - Math.log(80)), 0, 1),
+                0.18
+            );
             sm.loudNorm = MathUtils.clamp((sm.loud + 58) / 38, 0, 1);
-
-            if (S.onset > 0.3) this.transientFlash = Math.max(this.transientFlash, S.onset);
-            if (S.note !== '—' && S.note !== this.lastNote) { this.transientFlash = 1; this.lastNote = S.note; }
         }
-        updateTime(dt) { this.transientFlash *= 0.84; }
+        update(dt) {
+            this.updateSmoothing();
+            this.transientFlash *= 0.84;
+        }
     }
 
     class UIManager {
