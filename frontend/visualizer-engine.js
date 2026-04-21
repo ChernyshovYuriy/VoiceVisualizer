@@ -137,22 +137,27 @@ class RingSystem {
         this.smState = voiced ? 'TRACKING' : 'IDLE';
 
         const targetY = voiced ? liveState.y : 0.0;
-        const targetRadius = voiced ? 0.9 + liveState.loudNorm * 1.6 : 0.85;
+        const targetRadius = voiced ? liveState.radius : 0.85;
         const targetFlash = voiced ? liveState.transient : 0;
+        const thicknessBase = MathUtils.lerp(0.035, 0.078, liveState?.stability ?? 0);
+        const opacityBase = VISUAL_SCENE_CONFIG.ringOpacity * MathUtils.lerp(0.5, 1.0, liveState?.stability ?? 0);
 
-        this.displayY = MathUtils.lerp(this.displayY, targetY, voiced ? 0.18 : 0.08);
+        this.displayY = MathUtils.lerp(this.displayY, targetY, voiced ? (liveState.followY ?? 0.16) : 0.08);
         this.displayRadius = MathUtils.lerp(this.displayRadius, targetRadius, voiced ? 0.14 : 0.08);
         this.displayFlash = MathUtils.lerp(this.displayFlash, targetFlash, 0.25);
 
         const baseHue = (liveState?.pitchNorm ?? 0.5) * 0.38 + 0.02;
-        const baseSat = 0.72;
-        const baseLight = 0.46;
+        const baseSat = MathUtils.lerp(0.58, 0.76, liveState?.sisterRichness ?? 0);
+        const baseLight = MathUtils.lerp(0.40, 0.52, liveState?.centroidNorm ?? 0.2);
         this.displayColor.lerp(new THREE.Color().setHSL(baseHue, baseSat, baseLight), 0.12);
 
-        this.rings.forEach((ring) => {
+        this.rings.forEach((ring, idx) => {
             ring.mesh.position.y = this.displayY + ring.yOffset;
-            ring.mat.uniforms.uRadius.value = this.displayRadius * ring.radiusScale;
+            const sisterScale = idx === 0 ? 1.0 : MathUtils.lerp(0.92, 1.12, liveState?.sisterRichness ?? 0);
+            ring.mat.uniforms.uRadius.value = this.displayRadius * ring.radiusScale * sisterScale;
             ring.mat.uniforms.uFlash.value = this.displayFlash;
+            ring.mat.uniforms.uThickness.value = thicknessBase * (idx === 0 ? 1.0 : 0.88);
+            ring.mat.uniforms.uOpacity.value = opacityBase * (idx === 0 ? 1.0 : MathUtils.lerp(0.58, 0.84, liveState?.sisterRichness ?? 0));
             ring.mat.uniforms.uColor.value = new THREE.Color().setHSL(
                 MathUtils.clamp(baseHue + ring.hueShift, 0, 1),
                 baseSat * 0.92,
@@ -182,12 +187,24 @@ class VisualizerEngine {
 
     buildLiveState() {
         const sm = this.audio.smoothed;
+        const conf = MathUtils.clamp(sm.pitchConf, 0, 1);
+        const pitchMix = MathUtils.lerp(sm.histPitchNorm, sm.pitchNorm, conf);
+        const loudMix = MathUtils.clamp(0.56 * sm.loudNorm + 0.34 * sm.energyNorm + 0.10 * sm.histLoudNorm, 0, 1);
+        const yFromPitch = -3.8 + pitchMix * 7.6;
+        const memoryOffset = (sm.histPitchNorm - sm.pitchNorm) * 0.7;
+        const transient = MathUtils.clamp(this.audio.transientFlash * 0.75 + sm.histOnset * 0.35, 0, 1);
+        const sisterRichness = MathUtils.clamp(0.6 * sm.peakSpread + 0.4 * sm.centroidNorm, 0, 1);
+
         return {
-            active: sm.pitch > 40,
-            y: -4.0 + sm.pitchNorm * 8.0,
-            pitchNorm: sm.pitchNorm,
-            loudNorm: sm.loudNorm,
-            transient: this.audio.transientFlash
+            active: sm.pitch > 40 && conf > 0.08,
+            y: yFromPitch + memoryOffset * 0.35,
+            followY: MathUtils.lerp(0.05, 0.2, conf),
+            pitchNorm: pitchMix,
+            radius: 0.82 + loudMix * 1.75 + transient * 0.2,
+            transient,
+            stability: conf,
+            sisterRichness,
+            centroidNorm: sm.centroidNorm
         };
     }
 
