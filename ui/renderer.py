@@ -48,16 +48,23 @@ uniform vec3  uEye;
 void main() {
     vec3 n = normalize(vWorldNorm);
     vec3 v = normalize(uEye - vWorldPos);
-    float ndotv = abs(dot(n, v));
-    // Bright at silhouette (ndotv~0), dim face-on
-    float rim   = 1.0 - ndotv;
-    float inner = smoothstep(0.65, 0.35, ndotv);
-    float body  = exp(-pow(rim * 3.0, 2.0));
-    float halo  = exp(-pow(rim * 1.2, 2.0));
-    float alpha = (inner * 0.55 + body * 0.35 + halo * 0.15) * uOpacity;
+    vec3 L = normalize(vec3(2.0, 4.0, 3.0));   // key light
+    float ndotL = max(dot(n, L), 0.0);
+    float ndotv = max(dot(n, v), 0.0);
+
+    // Diffuse + specular Phong on tube surface
+    float diff = 0.15 + ndotL * 0.75;
+    vec3 h = normalize(L + v);
+    float spec = pow(max(dot(n, h), 0.0), 48.0) * 0.6;
+
+    // Fresnel rim glow for the silhouette halo
+    float rim = 1.0 - ndotv;
+    float halo = exp(-pow(rim * 1.4, 2.0)) * 0.3;
+
+    float alpha = clamp((diff * 0.7 + halo + spec) * uOpacity, 0.0, 1.0);
     if (alpha < 0.003) discard;
-    vec3 col = mix(uColor, vec3(1.0, 0.95, 0.85), uFlash * 0.30);
-    col += inner * vec3(0.08, 0.04, 0.01);
+    vec3 col = uColor * diff + vec3(spec);
+    col = mix(col, vec3(1.0, 0.95, 0.85), uFlash * 0.35);
     fragColor = vec4(col, alpha);
 }
 """
@@ -109,7 +116,7 @@ def _scale(s):
 
 # ── torus geometry ────────────────────────────────────────────────────────────
 
-def _torus(R=1.0, r=0.032, seg=96, tseg=16):
+def _torus(R=1.0, r=0.18, seg=96, tseg=32):
     """Torus in XZ plane. Returns float32 (N,6): xyz + normal xyz."""
     rows = []
     for i in range(seg):
@@ -209,11 +216,9 @@ def _ul(p,n): return GL.glGetUniformLocation(p,n)
 # ── ring layout ───────────────────────────────────────────────────────────────
 
 _RINGS = [
-    (0.00, 1.00, 0.90, False),
-    (0.42, 0.93, 0.44, True),
-    (0.84, 0.87, 0.24, True),
-    (-0.42, 0.93, 0.44, True),
-    (-0.84, 0.87, 0.24, True),
+    (0.00, 1.00, 0.90, False),   # main ring
+    (0.00, 0.82, 0.38, True),    # inner echo (smaller)
+    (0.00, 1.18, 0.28, True),    # outer echo (larger)
 ]
 
 # ── widget ────────────────────────────────────────────────────────────────────
@@ -238,7 +243,7 @@ class RingWidget(QOpenGLWidget):
 
         # Camera orbit: yaw around Y, pitch above horizon
         self._yaw   = 25.0
-        self._pitch = 52.0   # above ring plane so we see the ring face
+        self._pitch = 28.0   # low angle shows the ring as a 3D torus
         self._dist  =  7.0
         self._mp: QPoint | None = None
 
