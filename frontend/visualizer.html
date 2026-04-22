@@ -3,209 +3,272 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
-    <title>Voice / Music Visualizer</title>
+    <title>Voice Visualizer</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@300;400;500&family=Syne:wght@400;600;700;800&display=swap" rel="stylesheet">
     <style>
         *, *::before, *::after { margin:0; padding:0; box-sizing:border-box; }
-        html, body { width:100%; height:100%; overflow:hidden; background:#020609;
-            font-family:'Inter','Segoe UI','SF Pro Text',sans-serif; }
-
-        #canvas-container {
-            position:absolute; top:0; left:0;
-            width:100%; height:100%;
-            z-index:1;
+        html, body {
+            width:100%; height:100%; overflow:hidden;
+            background:#030608;
+            font-family:'Syne',sans-serif;
         }
+        canvas#canvas-container {
+            position:absolute; top:0; left:0; width:100%; height:100%; z-index:1;
+        }
+
+        /* ── overlay layer ── */
         #ui-layer {
-            position:absolute; top:0; left:0;
-            width:100%; height:100%;
+            position:absolute; top:0; left:0; width:100%; height:100%;
             pointer-events:none; z-index:10;
         }
 
-        /* connection pill */
+        /* ── connection badge ── */
         #status-badge {
-            position:absolute; bottom:22px; left:20px;
-            display:flex; align-items:center; gap:7px;
-            padding:6px 13px 6px 9px;
-            background:rgba(4,12,26,0.75);
-            border:1px solid rgba(40,80,130,0.18);
+            position:absolute; bottom:20px; left:18px;
+            display:flex; align-items:center; gap:6px;
+            padding:5px 11px 5px 8px;
+            background:rgba(3,6,8,0.82);
+            border:1px solid rgba(255,255,255,0.06);
             border-radius:999px;
-            backdrop-filter:blur(20px) saturate(140%);
-            -webkit-backdrop-filter:blur(20px) saturate(140%);
-            transition:border-color .5s;
+            backdrop-filter:blur(16px);
         }
-        #status-badge.live  { border-color:rgba(34,197,94,.28); }
-        #status-badge.error { border-color:rgba(239,68,68,.28); }
-        .status-dot { width:6px; height:6px; border-radius:50%; background:#f59e0b;
-            flex-shrink:0; transition:background .5s, box-shadow .5s; }
-        .status-dot.live  { background:#22c55e; box-shadow:0 0 7px rgba(34,197,94,.7); }
-        .status-dot.error { background:#ef4444; box-shadow:0 0 7px rgba(239,68,68,.7); }
-        #status-text { font-size:9.5px; font-weight:700; letter-spacing:1px; text-transform:uppercase;
-            color:rgba(120,160,200,.40); transition:color .5s; }
-        #status-badge.live  #status-text { color:rgba(134,239,172,.60); }
-        #status-badge.error #status-text { color:rgba(252,165,165,.60); }
+        #status-badge.live  { border-color:rgba(52,211,153,0.22); }
+        #status-badge.error { border-color:rgba(239,68,68,0.22); }
+        .status-dot {
+            width:5px; height:5px; border-radius:50%;
+            background:#64748b; flex-shrink:0;
+            transition:background .4s, box-shadow .4s;
+        }
+        .status-dot.live  { background:#34d399; box-shadow:0 0 8px rgba(52,211,153,.65); }
+        .status-dot.error { background:#ef4444; box-shadow:0 0 8px rgba(239,68,68,.65); }
+        #status-text {
+            font-family:'DM Mono',monospace;
+            font-size:8px; font-weight:500; letter-spacing:1.4px;
+            text-transform:uppercase; color:rgba(100,116,139,.55);
+            transition:color .4s;
+        }
+        #status-badge.live  #status-text { color:rgba(52,211,153,.5); }
+        #status-badge.error #status-text { color:rgba(239,68,68,.5); }
 
-        /* info panel */
+        /* ── state label ── */
+        #state-label {
+            position:absolute; top:22px; left:22px;
+            font-family:'DM Mono',monospace;
+            font-size:7.5px; font-weight:500; letter-spacing:2px;
+            text-transform:uppercase; color:rgba(100,116,139,.25);
+            pointer-events:none; transition:color .5s;
+        }
+        #state-label.active { color:rgba(251,191,36,.3); }
+
+        /* ── hint ── */
+        #ax-hint {
+            position:absolute; bottom:20px; left:50%; transform:translateX(-50%);
+            font-family:'DM Mono',monospace;
+            font-size:7.5px; letter-spacing:1.2px; text-transform:uppercase;
+            color:rgba(100,116,139,.18); pointer-events:none; white-space:nowrap;
+        }
+
+        /* ── info panel ── */
         #info-panel {
-            position:absolute; top:24px; right:24px; width:228px;
-            background:rgba(8,11,18,0.72);
-            border:1px solid rgba(255,255,255,.08);
-            border-radius:16px;
-            backdrop-filter:blur(28px) saturate(140%);
-            -webkit-backdrop-filter:blur(28px) saturate(140%);
-            box-shadow:0 24px 48px rgba(0,0,0,.5), inset 0 1px 0 rgba(255,255,255,.06);
-            padding:14px 14px 12px;
-            display:flex; flex-direction:column; gap:0;
+            position:absolute; top:18px; right:18px;
+            width:216px;
+            background:rgba(4,8,14,0.78);
+            border:1px solid rgba(255,255,255,0.07);
+            border-radius:14px;
+            backdrop-filter:blur(32px) saturate(160%);
             overflow:hidden;
         }
 
+        /* top accent line */
         #info-panel::before {
-            content:''; display:block;
-            height:1px; width:100%;
-            margin:-14px -14px 14px;
-            width:calc(100% + 28px);
+            content:'';
+            display:block;
+            height:1px;
             background:linear-gradient(90deg,
-                transparent 0%, rgba(255,200,100,.18) 30%, rgba(100,180,255,.14) 70%, transparent 100%);
-            transition:background 0.6s;
+                transparent 0%,
+                rgba(251,191,36,.22) 30%,
+                rgba(99,179,237,.18) 70%,
+                transparent 100%);
         }
 
+        .panel-inner { padding:14px 15px 13px; display:flex; flex-direction:column; gap:0; }
+
+        /* header row */
         .p-header {
-            padding:0 0 10px;
-            border-bottom:1px solid rgba(255,255,255,.07);
             display:flex; align-items:center; justify-content:space-between;
+            padding-bottom:12px;
+            border-bottom:1px solid rgba(255,255,255,0.06);
         }
-        .p-header-label { font-size:8.5px; font-weight:700; letter-spacing:1.2px;
-            text-transform:uppercase; color:rgba(200,210,230,.38); }
-        .p-live-dot { width:5px; height:5px; border-radius:50%;
-            background:rgba(245,158,11,.65); box-shadow:0 0 7px rgba(245,158,11,.45);
-            transition:background .4s, box-shadow .4s; }
-        .p-live-dot.active {
-            background:rgba(74,222,128,.72); box-shadow:0 0 7px rgba(74,222,128,.5);
+        .p-title {
+            font-size:7px; font-weight:700; letter-spacing:2px;
+            text-transform:uppercase; color:rgba(148,163,184,.35);
+        }
+        .p-dot {
+            width:4px; height:4px; border-radius:50%;
+            background:rgba(100,116,139,.4);
+            box-shadow:none;
+            transition:background .4s, box-shadow .4s;
+        }
+        .p-dot.active {
+            background:rgba(52,211,153,.7);
+            box-shadow:0 0 6px rgba(52,211,153,.5);
         }
 
-        .note-section {
-            padding:12px 0 11px;
-            display:flex; align-items:center; gap:14px;
-            border-bottom:1px solid rgba(255,255,255,.07);
+        /* note hero */
+        .note-hero {
+            padding:14px 0 13px;
+            display:flex; align-items:center; gap:13px;
+            border-bottom:1px solid rgba(255,255,255,0.06);
         }
-        .note-ring {
-            width:54px; height:54px; border-radius:50%; flex-shrink:0;
-            border:1px solid rgba(255,255,255,.12);
+        .note-glyph {
+            width:50px; height:50px; border-radius:50%; flex-shrink:0;
+            border:1px solid rgba(255,255,255,0.09);
             display:flex; align-items:center; justify-content:center;
-            transition:border-color .4s, box-shadow .4s, background .4s;
-            position:relative;
+            position:relative; overflow:hidden;
+            transition:border-color .4s, box-shadow .4s;
         }
-        .note-ring::after {
+        .note-glyph::before {
             content:''; position:absolute; inset:0; border-radius:50%;
-            background:radial-gradient(circle at center, rgba(255,188,100,.06) 0%, transparent 70%);
+            background:radial-gradient(circle at 40% 35%, rgba(251,191,36,.06) 0%, transparent 65%);
             opacity:0; transition:opacity .4s;
         }
-        .note-ring.voiced {
-            border-color:rgba(255,200,100,.48);
-            box-shadow:0 0 18px rgba(255,180,90,.16), 0 0 40px rgba(255,160,60,.06);
+        .note-glyph.voiced {
+            border-color:rgba(251,191,36,.35);
+            box-shadow:0 0 20px rgba(251,191,36,.1), 0 0 1px rgba(251,191,36,.2) inset;
         }
-        .note-ring.voiced::after { opacity:1; }
+        .note-glyph.voiced::before { opacity:1; }
         #v-note {
-            font-size:20px; font-weight:700; letter-spacing:-.5px; line-height:1;
-            color:rgba(220,228,248,.36); transition:color .25s, text-shadow .25s;
+            font-size:19px; font-weight:800; letter-spacing:-.5px;
+            color:rgba(203,213,225,.28); transition:color .2s;
             position:relative; z-index:1;
         }
-        #v-note.voiced { color:#fff8e8; text-shadow:0 0 20px rgba(255,190,90,.3); }
-        .note-meta { display:flex; flex-direction:column; gap:3px; }
-        #note-sub { font-size:9px; font-weight:600; letter-spacing:.7px;
-            text-transform:uppercase; color:rgba(200,210,230,.38);
-            transition:color .3s; }
-        #note-sub.voiced { color:rgba(255,200,120,.55); }
-        #note-name-display {
-            font-size:11px; font-weight:500; letter-spacing:.2px;
-            color:rgba(220,228,248,.22); transition:color .3s;
-            min-height:16px;
-        }
-        #note-name-display.voiced { color:rgba(220,228,248,.58); }
+        #v-note.voiced { color:#fef3c7; }
 
-        .metrics { padding:10px 0 0; display:flex; flex-direction:column; gap:0; }
+        .note-text { display:flex; flex-direction:column; gap:3px; }
+        #note-sub {
+            font-family:'DM Mono',monospace;
+            font-size:8px; font-weight:500; letter-spacing:1.2px;
+            text-transform:uppercase; color:rgba(148,163,184,.3);
+            transition:color .3s;
+        }
+        #note-sub.voiced { color:rgba(251,191,36,.5); }
+        #note-hz {
+            font-family:'DM Mono',monospace;
+            font-size:12px; font-weight:400; color:rgba(203,213,225,.2);
+            transition:color .3s; min-height:17px; letter-spacing:.3px;
+        }
+        #note-hz.voiced { color:rgba(203,213,225,.65); }
+
+        /* metrics */
+        .metrics { padding-top:10px; display:flex; flex-direction:column; }
         .metric {
-            padding:7px 0;
-            border-bottom:1px solid rgba(255,255,255,.06);
+            padding:6px 0;
+            border-bottom:1px solid rgba(255,255,255,0.05);
             display:flex; align-items:center; justify-content:space-between; gap:8px;
         }
         .metric:last-child { border-bottom:none; padding-bottom:0; }
-        .m-label { font-size:8px; font-weight:700; letter-spacing:1px;
-            text-transform:uppercase; color:rgba(200,210,230,.32); }
-        .m-value { font-family:'JetBrains Mono','Fira Code','Consolas',monospace;
-            font-size:11.5px; font-weight:500; color:rgba(210,220,238,.32); transition:color .25s; }
-        .m-value.lit { color:rgba(240,245,255,.82); }
-        .vu-track { height:2px; border-radius:1px; background:rgba(255,255,255,.09);
-            overflow:hidden; width:82px; margin-left:auto; margin-top:4px; }
-        #vol-bar { height:100%; width:0%; border-radius:1px; background:#4ade80;
-            transition:width .07s linear, background .2s; }
+        .m-label {
+            font-family:'DM Mono',monospace;
+            font-size:7px; font-weight:500; letter-spacing:1.5px;
+            text-transform:uppercase; color:rgba(100,116,139,.4);
+        }
+        .m-val {
+            font-family:'DM Mono',monospace;
+            font-size:11px; font-weight:400; color:rgba(203,213,225,.25);
+            transition:color .2s; letter-spacing:.3px;
+        }
+        .m-val.lit { color:rgba(226,232,240,.78); }
+
+        /* volume row with bar */
+        .vol-row { display:flex; flex-direction:column; align-items:flex-end; gap:4px; }
+        .vu-track {
+            width:74px; height:2px; border-radius:1px;
+            background:rgba(255,255,255,0.07); overflow:hidden;
+        }
+        #vol-bar {
+            height:100%; width:0%; border-radius:1px;
+            background:linear-gradient(90deg, #34d399, #22d3ee);
+            transition:width .06s linear, opacity .2s;
+        }
+
+        /* chips */
         .chip {
             display:inline-flex; align-items:center;
-            padding:3px 9px; border-radius:999px;
-            font-size:9.5px; font-weight:600; letter-spacing:.1px;
-            border:1px solid rgba(255,255,255,.08); background:rgba(255,255,255,.03);
-            color:rgba(210,220,238,.40);
-            transition:color .25s, background .25s, border-color .25s, box-shadow .25s;
+            padding:2px 8px; border-radius:999px;
+            font-family:'DM Mono',monospace;
+            font-size:9px; font-weight:500; letter-spacing:.3px;
+            border:1px solid rgba(255,255,255,0.07);
+            background:rgba(255,255,255,0.03);
+            color:rgba(148,163,184,.35);
+            transition:color .25s, border-color .25s, background .25s;
         }
-        .chip.lit { box-shadow:0 0 10px rgba(255,255,255,.04); }
+        .chip.lit {
+            border-color:rgba(99,179,237,.25);
+            background:rgba(99,179,237,.06);
+            color:rgba(186,230,253,.6);
+        }
 
-        #ax-hint {
-            position:absolute; bottom:22px; left:50%; transform:translateX(-50%);
-            font-size:8.5px; letter-spacing:.7px; text-transform:uppercase;
-            color:rgba(60,100,150,.24); pointer-events:none; white-space:nowrap;
+        /* onset flash */
+        #onset-flash {
+            position:absolute; inset:0; pointer-events:none;
+            background:radial-gradient(ellipse at center, rgba(251,191,36,.07) 0%, transparent 65%);
+            opacity:0; transition:opacity .05s;
+            z-index:5;
         }
-
-        #state-label {
-            position:absolute; top:24px; left:24px;
-            font-size:8.5px; font-weight:700; letter-spacing:1.1px; text-transform:uppercase;
-            color:rgba(100,150,200,.20); pointer-events:none;
-            transition:color .4s;
-        }
-        #state-label.active { color:rgba(255,200,100,.28); }
     </style>
 </head>
 <body>
 <canvas id="canvas-container"></canvas>
+<div id="onset-flash"></div>
+
 <div id="ui-layer">
     <div id="state-label">Idle</div>
+
     <div id="status-badge">
         <div id="status-dot" class="status-dot"></div>
         <span id="status-text">Connecting</span>
     </div>
+
     <div id="ax-hint">Pitch field &middot; Brightness &middot; Energy</div>
+
     <div id="info-panel">
-        <div class="p-header">
-            <span class="p-header-label">Voice Analysis</span>
-            <span class="p-live-dot" id="p-live-dot"></span>
-        </div>
-        <div class="note-section">
-            <div class="note-ring" id="note-ring">
-                <span id="v-note">—</span>
+        <div class="panel-inner">
+            <div class="p-header">
+                <span class="p-title">Voice Analysis</span>
+                <span class="p-dot" id="p-dot"></span>
             </div>
-            <div class="note-meta">
-                <div id="note-sub">No signal</div>
-                <div id="note-name-display">—</div>
-            </div>
-        </div>
-        <div class="metrics">
-            <div class="metric">
-                <div class="m-label">Frequency</div>
-                <div class="m-value" id="v-freq">— Hz</div>
-            </div>
-            <div class="metric">
-                <div class="m-label">Volume</div>
-                <div>
-                    <div class="m-value lit" id="v-vol">— dB</div>
-                    <div class="vu-track">
-                        <div id="vol-bar"></div>
-                    </div>
+
+            <div class="note-hero">
+                <div class="note-glyph" id="note-glyph">
+                    <span id="v-note">—</span>
+                </div>
+                <div class="note-text">
+                    <div id="note-sub">No signal</div>
+                    <div id="note-hz">—</div>
                 </div>
             </div>
-            <div class="metric">
-                <div class="m-label">Timbre</div>
-                <span class="chip" id="v-timbre">—</span>
-            </div>
-            <div class="metric">
-                <div class="m-label">Range</div>
-                <span class="chip" id="v-range">—</span>
+
+            <div class="metrics">
+                <div class="metric">
+                    <span class="m-label">Freq</span>
+                    <span class="m-val" id="v-freq">— Hz</span>
+                </div>
+                <div class="metric">
+                    <span class="m-label">Vol</span>
+                    <div class="vol-row">
+                        <span class="m-val lit" id="v-vol">— dB</span>
+                        <div class="vu-track"><div id="vol-bar"></div></div>
+                    </div>
+                </div>
+                <div class="metric">
+                    <span class="m-label">Timbre</span>
+                    <span class="chip" id="v-timbre">—</span>
+                </div>
+                <div class="metric">
+                    <span class="m-label">Range</span>
+                    <span class="chip" id="v-range">—</span>
+                </div>
             </div>
         </div>
     </div>
@@ -215,7 +278,8 @@
 <script src="https://unpkg.com/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
 
 <script>
-    const CONFIG = { wsUrl: 'ws://localhost:8765', bands: 16 };
+    const CONFIG = { wsUrl: 'ws://localhost:8765' };
+
     const MathUtils = {
         clamp: (v, lo, hi) => Math.max(lo, Math.min(hi, v)),
         lerp: (a, b, t) => a + (b - a) * t,
@@ -263,25 +327,31 @@
             };
             this.transientFlash = 0;
             this.lastNote = '—';
+            this._newData = false;
         }
+
         ingestFrame(d) {
             const S = this.state;
-            S.mel = Array.isArray(d.mel) ? Float32Array.from(d.mel) : S.mel;
-            S.melHist = Array.isArray(d.melHist) ? d.melHist : [];
-            S.pitch = d.pitch || 0;
-            S.pitchHist = Array.isArray(d.pitchHist) ? d.pitchHist : [];
-            S.loudness = d.loudness ?? -80;
-            S.loudHist = Array.isArray(d.loudHist) ? d.loudHist : [];
-            S.centroid = d.centroid ?? 900;
+            if (Array.isArray(d.mel) && d.mel.length === 64) {
+                for (let i = 0; i < 64; i++) S.mel[i] = d.mel[i];
+            }
+            S.melHist      = Array.isArray(d.melHist) ? d.melHist : [];
+            S.pitch        = d.pitch != null ? d.pitch : 0;
+            S.pitchHist    = Array.isArray(d.pitchHist) ? d.pitchHist : [];
+            S.loudness     = d.loudness ?? -80;
+            S.loudHist     = Array.isArray(d.loudHist) ? d.loudHist : [];
+            S.centroid     = d.centroid ?? 900;
             S.centroidHist = Array.isArray(d.centroidHist) ? d.centroidHist : [];
-            S.note = d.note || '—';
-            S.timbre = d.timbre || '—';
-            S.range = d.range || '—';
-            S.onset = d.onset || 0;
-            S.onsetHist = Array.isArray(d.onsetHist) ? d.onsetHist : [];
-            S.energy = d.energy || 0;
-            S.pitchConf = d.pitchConf || 0;
-            S.peaks = Array.isArray(d.peaks) ? d.peaks : [];
+            S.note         = d.note || '—';
+            S.timbre       = d.timbre || '—';
+            S.range        = d.range || '—';
+            S.onset        = d.onset ?? 0;
+            S.onsetHist    = Array.isArray(d.onsetHist) ? d.onsetHist : [];
+            S.energy       = d.energy ?? 0;
+            S.pitchConf    = d.pitchConf ?? 0;
+            S.peaks        = Array.isArray(d.peaks) ? d.peaks : [];
+
+            this._newData = true;
 
             if (S.onset > 0.3) this.transientFlash = Math.max(this.transientFlash, S.onset);
             if (S.note !== '—' && S.note !== this.lastNote) {
@@ -289,45 +359,54 @@
                 this.lastNote = S.note;
             }
         }
+
         updateSmoothing() {
-            const S = this.state;
-            const sm = this.smoothed;
+            const S = this.state, sm = this.smoothed;
             const conf = MathUtils.clamp(S.pitchConf, 0, 1);
-            const targetPitch = (S.pitch > 40) ? S.pitch : sm.pitch;
-            const hzToNorm = (hz) =>
-                MathUtils.clamp((Math.log(MathUtils.clamp(hz, 65.4, 2093.0)) - Math.log(65.4)) / (Math.log(2093.0) - Math.log(65.4)), 0, 1);
-            const avg = (arr, fallback = 0) => (arr && arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : fallback);
-            const histPitch = avg(S.pitchHist, targetPitch);
-            const histLoud = avg(S.loudHist, S.loudness);
-            const histOnset = avg(S.onsetHist, S.onset);
-            const peakValues = S.peaks.map((p) => p?.value ?? 0).filter((v) => Number.isFinite(v));
-            const peakBins = S.peaks.map((p) => p?.bin ?? 0).filter((v) => Number.isFinite(v));
-            const spread = peakBins.length > 1 ? (Math.max(...peakBins) - Math.min(...peakBins)) / 63 : 0;
+            const targetPitch = S.pitch > 40 ? S.pitch : sm.pitch;
+            const LOG_LO = Math.log(65.4), LOG_RANGE = Math.log(2093.0) - LOG_LO;
+            const hzToNorm = hz => MathUtils.clamp((Math.log(MathUtils.clamp(hz, 65.4, 2093.0)) - LOG_LO) / LOG_RANGE, 0, 1);
+            const avgArr = (arr, fb = 0) => { if (!arr || !arr.length) return fb; let s = 0; for (let i = 0; i < arr.length; i++) s += arr[i]; return s / arr.length; };
 
-            const pitchFollow = MathUtils.lerp(0.04, 0.22, conf * conf);
-            sm.pitch = MathUtils.lerp(sm.pitch, targetPitch, pitchFollow);
-            sm.loud = MathUtils.lerp(sm.loud, S.loudness, 0.15);
-            sm.onset = MathUtils.lerp(sm.onset, S.onset, 0.4);
-            sm.energy = MathUtils.lerp(sm.energy, S.energy, 0.2);
-            sm.pitchConf = MathUtils.lerp(sm.pitchConf, conf, 0.18);
-            sm.pitchNorm = MathUtils.lerp(sm.pitchNorm, hzToNorm(sm.pitch), MathUtils.lerp(0.05, 0.22, conf));
-            sm.loudNorm = MathUtils.clamp((sm.loud + 58) / 38, 0, 1);
-            sm.energyNorm = MathUtils.clamp(sm.energy, 0, 1);
+            const histPitch = avgArr(S.pitchHist, targetPitch);
+            const histLoud  = avgArr(S.loudHist, S.loudness);
+            const histOnset = avgArr(S.onsetHist, S.onset);
+
+            let peakSum = 0, peakCount = 0, minBin = 63, maxBin = 0;
+            for (let i = 0; i < S.peaks.length; i++) {
+                const v = S.peaks[i]?.value ?? 0, b = S.peaks[i]?.bin ?? 0;
+                if (!Number.isFinite(v) || !Number.isFinite(b)) continue;
+                peakSum += v; peakCount++;
+                if (b < minBin) minBin = b;
+                if (b > maxBin) maxBin = b;
+            }
+            const peakIntensity = peakCount ? peakSum / peakCount : 0;
+            const spread = peakCount > 1 ? (maxBin - minBin) / 63 : 0;
+
+            const pf = MathUtils.lerp(0.04, 0.22, conf * conf);
+            sm.pitch        = MathUtils.lerp(sm.pitch, targetPitch, pf);
+            sm.loud         = MathUtils.lerp(sm.loud, S.loudness, 0.15);
+            sm.onset        = MathUtils.lerp(sm.onset, S.onset, 0.4);
+            sm.energy       = MathUtils.lerp(sm.energy, S.energy, 0.2);
+            sm.pitchConf    = MathUtils.lerp(sm.pitchConf, conf, 0.18);
+            sm.pitchNorm    = MathUtils.lerp(sm.pitchNorm, hzToNorm(sm.pitch), MathUtils.lerp(0.05, 0.22, conf));
+            sm.loudNorm     = MathUtils.clamp((sm.loud + 58) / 38, 0, 1);
+            sm.energyNorm   = MathUtils.clamp(sm.energy, 0, 1);
             sm.centroidNorm = MathUtils.lerp(sm.centroidNorm, MathUtils.clamp((S.centroid - 250) / 3600, 0, 1), 0.16);
-            sm.stability = MathUtils.lerp(sm.stability, conf, 0.2);
-            sm.peakSpread = MathUtils.lerp(sm.peakSpread, spread, 0.2);
+            sm.stability    = MathUtils.lerp(sm.stability, conf, 0.2);
+            sm.peakSpread   = MathUtils.lerp(sm.peakSpread, spread, 0.2);
             sm.histPitchNorm = MathUtils.lerp(sm.histPitchNorm, hzToNorm(histPitch > 40 ? histPitch : sm.pitch), 0.12);
-            sm.histLoudNorm = MathUtils.lerp(sm.histLoudNorm, MathUtils.clamp((histLoud + 58) / 38, 0, 1), 0.12);
-            sm.histOnset = MathUtils.lerp(sm.histOnset, MathUtils.clamp(histOnset, 0, 1), 0.22);
+            sm.histLoudNorm  = MathUtils.lerp(sm.histLoudNorm, MathUtils.clamp((histLoud + 58) / 38, 0, 1), 0.12);
+            sm.histOnset     = MathUtils.lerp(sm.histOnset, MathUtils.clamp(histOnset, 0, 1), 0.22);
 
-            const peakIntensity = peakValues.length ? avg(peakValues, 0) : 0;
             if (S.onset > 0.22 || peakIntensity > 0.42) {
-                const peakFlash = MathUtils.clamp(0.45 * S.onset + 0.55 * peakIntensity, 0, 1);
-                this.transientFlash = Math.max(this.transientFlash, peakFlash);
+                const pf2 = MathUtils.clamp(0.45 * S.onset + 0.55 * peakIntensity, 0, 1);
+                this.transientFlash = Math.max(this.transientFlash, pf2);
             }
         }
+
         update(dt) {
-            this.updateSmoothing();
+            if (this._newData) { this.updateSmoothing(); this._newData = false; }
             this.transientFlash *= 0.84;
         }
     }
@@ -336,81 +415,115 @@
         constructor(audioManager) {
             this.audio = audioManager;
             this.els = {
-                note: document.getElementById('v-note'),
-                freq: document.getElementById('v-freq'),
-                vol: document.getElementById('v-vol'),
+                note:   document.getElementById('v-note'),
+                freq:   document.getElementById('v-freq'),
+                vol:    document.getElementById('v-vol'),
                 timbre: document.getElementById('v-timbre'),
-                range: document.getElementById('v-range'),
-                noteSub: document.getElementById('note-sub'),
-                noteNameDisplay: document.getElementById('note-name-display'),
-                pLiveDot: document.getElementById('p-live-dot'),
-                stateLabel: document.getElementById('state-label'),
+                range:  document.getElementById('v-range'),
+                noteSub:  document.getElementById('note-sub'),
+                noteHz:   document.getElementById('note-hz'),
+                pDot:     document.getElementById('p-dot'),
+                state:    document.getElementById('state-label'),
+                glyph:    document.getElementById('note-glyph'),
+                volBar:   document.getElementById('vol-bar'),
+                onsetFl:  document.getElementById('onset-flash'),
             };
             this._lastState = null;
+            this._lastOnset = 0;
         }
+
         update(engineState) {
-            const S = this.audio.state;
+            const S  = this.audio.state;
             const sm = this.audio.smoothed;
             const voiced = S.note && S.note !== '—';
-            const ring = document.getElementById('note-ring');
 
+            // note hero
             this.els.note.textContent = S.note || '—';
+            this.els.note.classList.toggle('voiced', voiced);
+            this.els.glyph.classList.toggle('voiced', voiced);
+            this.els.pDot.classList.toggle('active', voiced);
             if (voiced) {
-                this.els.note.classList.add('voiced');
-                ring.classList.add('voiced');
                 this.els.noteSub.textContent = S.range !== '—' ? S.range + ' voice' : 'Voiced';
-                this.els.noteNameDisplay.textContent = S.pitch ? S.pitch.toFixed(1) + ' Hz' : '—';
-                this.els.pLiveDot.classList.add('active');
+                this.els.noteSub.classList.add('voiced');
+                this.els.noteHz.textContent  = S.pitch ? S.pitch.toFixed(1) + ' Hz' : '—';
+                this.els.noteHz.classList.add('voiced');
             } else {
-                this.els.note.classList.remove('voiced');
-                ring.classList.remove('voiced');
                 this.els.noteSub.textContent = 'No signal';
-                this.els.noteNameDisplay.textContent = '—';
-                this.els.pLiveDot.classList.remove('active');
+                this.els.noteSub.classList.remove('voiced');
+                this.els.noteHz.textContent  = '—';
+                this.els.noteHz.classList.remove('voiced');
             }
 
+            // state label
             if (engineState && engineState !== this._lastState) {
                 this._lastState = engineState;
-                this.els.stateLabel.textContent = engineState;
-                this.els.stateLabel.classList.toggle('active', engineState === 'TRACKING');
+                this.els.state.textContent = engineState;
+                this.els.state.classList.toggle('active', engineState === 'TRACKING');
             }
 
+            // metrics
             this.els.freq.textContent = S.pitch ? S.pitch.toFixed(1) + ' Hz' : '— Hz';
+            this.els.freq.classList.toggle('lit', S.pitch > 0);
+
             const db = sm.loud;
             this.els.vol.textContent = db.toFixed(1) + ' dB';
-            const bar = document.getElementById('vol-bar');
-            if (bar) bar.style.width=Math.max(0,Math.min(100,((db+70)/60)*100)).toFixed(1)+'%';
-            this.els.timbre.textContent=S.timbre||'—';
-            this.els.range.textContent=voiced?S.range:'—';
+            const barPct = Math.max(0, Math.min(100, ((db + 70) / 60) * 100));
+            this.els.volBar.style.width = barPct.toFixed(1) + '%';
+
+            const timbreLit = S.timbre && S.timbre !== '—';
+            this.els.timbre.textContent = S.timbre || '—';
+            this.els.timbre.classList.toggle('lit', timbreLit);
+
+            const rangeLit = voiced && S.range && S.range !== '—';
+            this.els.range.textContent = voiced ? (S.range || '—') : '—';
+            this.els.range.classList.toggle('lit', rangeLit);
+
+            // onset flash overlay
+            const onset = S.onset;
+            if (onset > 0.35 && onset > this._lastOnset) {
+                this.els.onsetFl.style.opacity = (onset * 0.7).toFixed(2);
+                setTimeout(() => { this.els.onsetFl.style.opacity = '0'; }, 80);
+            }
+            this._lastOnset = onset;
         }
     }
 
     class ConnectionManager {
-        constructor(url, onMessageCallback) {
-            this.url = url; this.onMessage = onMessageCallback;
-            this.connect();
+        constructor(url, onMessage) {
+            this.url = url; this.onMessage = onMessage; this.connect();
         }
         connect() {
             this.ws = new WebSocket(this.url);
-            this.ws.onopen = () => { document.getElementById('status-badge').className = 'live'; document.getElementById('status-text').textContent = 'Connected'; };
-            this.ws.onmessage = (e) => { try { this.onMessage(JSON.parse(e.data)); } catch (err) {} };
-            this.ws.onclose = () => { document.getElementById('status-badge').className = 'error'; document.getElementById('status-text').textContent = 'Disconnected'; setTimeout(() => this.connect(), 2000); };
+            this.ws.onopen  = () => {
+                const b = document.getElementById('status-badge');
+                const d = document.getElementById('status-dot');
+                const t = document.getElementById('status-text');
+                b.className = 'live'; d.className = 'status-dot live'; t.textContent = 'Connected';
+            };
+            this.ws.onmessage = e => { try { this.onMessage(JSON.parse(e.data)); } catch(_){} };
+            this.ws.onclose   = () => {
+                const b = document.getElementById('status-badge');
+                const d = document.getElementById('status-dot');
+                const t = document.getElementById('status-text');
+                b.className = 'error'; d.className = 'status-dot error'; t.textContent = 'Disconnected';
+                setTimeout(() => this.connect(), 2000);
+            };
         }
     }
 </script>
 <script src="./visualizer-engine.js"></script>
 <script>
     const audio = new AudioManager();
-    const ui = new UIManager(audio);
+    const ui    = new UIManager(audio);
     const engine = new VisualizerEngine('canvas-container', audio);
 
-    const _origRenderFrame = engine.renderFrame.bind(engine);
+    const _orig = engine.renderFrame.bind(engine);
     engine.renderFrame = function() {
-        _origRenderFrame();
+        _orig();
         ui.update(engine.systems?.rings?.smState ?? null);
     };
 
-    const wsManager = new ConnectionManager(CONFIG.wsUrl, (data) => audio.ingestFrame(data));
+    const ws = new ConnectionManager(CONFIG.wsUrl, d => audio.ingestFrame(d));
 
     window.addEventListener('resize', () => {
         engine.camera.aspect = window.innerWidth / window.innerHeight;

@@ -318,7 +318,7 @@ class RingSystem {
         }
     }
 
-    update(liveState) {
+    update(liveState, dt = 0.016) {
         this._frameCount += 1;
         const voiced = liveState?.active || false;
         this.smState = voiced ? 'TRACKING' : 'IDLE';
@@ -388,18 +388,21 @@ class RingSystem {
         this.beam.position.y = this.displayY;
         this.beam.material.color.copy(this.displayColor).multiplyScalar(0.92);
 
-        this.rings.forEach((ring, idx) => {
+        for (let idx = 0; idx < this.rings.length; idx++) {
+            const ring = this.rings[idx];
             ring.group.position.y = this.displayY + ring.yOffset;
             ring.group.position.z = (idx - 2) * VISUAL_SCENE_CONFIG.ringDepthStagger * (liveState?.depthSpread ?? 0.35);
             ring.group.rotation.z = (idx - 2) * (liveState?.ringTilt ?? 0.0);
             const coupledScale = idx === 0 ? 1.0 : sisterCoupling;
             const detailState = idx === 0 ? this._detailCache.main : this._detailCache.sister;
-            ring.shells.forEach(({ mat, shell }, shellIdx) => {
+            const ringThickness = thicknessBase * (idx === 0 ? 1.0 : 0.9);
+            for (let shellIdx = 0; shellIdx < ring.shells.length; shellIdx++) {
+                const { mat, shell } = ring.shells[shellIdx];
                 mat.uniforms.uRadius.value = this.displayRadius * ring.radiusScale * coupledScale * shell.radius;
                 mat.uniforms.uFlash.value = this.displayFlash;
-                mat.uniforms.uThickness.value = thicknessBase * (idx === 0 ? 1.0 : 0.9) * shell.thickness;
+                mat.uniforms.uThickness.value = ringThickness * shell.thickness;
                 mat.uniforms.uOpacity.value = opacityBase * ring.opacityScale * shell.opacity;
-                mat.uniforms.uTime.value += 0.016;
+                mat.uniforms.uTime.value += dt;   // real elapsed time, not hardcoded 16ms
                 mat.uniforms.uRingPhase.value = ring.phase + shellIdx * 0.14;
                 mat.uniforms.uColor.value.copy(this.displayColor).multiplyScalar(ring.toneScale * (1.0 - shellIdx * 0.05));
                 mat.uniforms.uDetailBudget.value = idx === 0
@@ -416,8 +419,8 @@ class RingSystem {
                 mat.uniforms.uMelBands.value.copy(this._cachedSignalVectors.melBands);
                 mat.uniforms.uPeakShape.value.copy(this._cachedSignalVectors.peakShape);
                 mat.uniforms.uPeakWeights.value.copy(this._cachedSignalVectors.peakWeights);
-            });
-        });
+            }
+        }
     }
 }
 
@@ -437,11 +440,18 @@ class VisualizerEngine {
             bg: new BackgroundSystem(this.scene),
             rings: new RingSystem(this.scene)
         };
+        // Reused liveState – avoids a GC allocation every frame
+        this._liveState = {};
+        this._lastDt = 0.016;
         this.animate();
     }
 
     _average(arr, fallback = 0) {
-        return (arr && arr.length) ? arr.reduce((a, b) => a + b, 0) / arr.length : fallback;
+        // Allocation-free: no .reduce() closure
+        if (!arr || !arr.length) return fallback;
+        let s = 0;
+        for (let i = 0; i < arr.length; i++) s += arr[i];
+        return s / arr.length;
     }
 
     _analyzeMel(mel, melHist) {
@@ -453,9 +463,8 @@ class VisualizerEngine {
         const midStart = Math.floor(len * 0.28);
         const midEnd = Math.floor(len * 0.72);
         const highStart = Math.min(len - 1, Math.floor(len * 0.65));
-        let low = 0;
-        let mid = 0;
-        let high = 0;
+        let low = 0, mid = 0, high = 0;
+        // Typed-array loops – no intermediate allocations
         for (let i = 0; i < lowEnd; i++) low += mel[i];
         for (let i = midStart; i < midEnd; i++) mid += mel[i];
         for (let i = highStart; i < len; i++) high += mel[i];
@@ -467,7 +476,10 @@ class VisualizerEngine {
         const prev = (melHist && melHist.length) ? melHist[melHist.length - 1] : null;
         let motion = 0;
         if (prev && prev.length === len) {
-            for (let i = 0; i < len; i++) motion += Math.abs((mel[i] ?? 0) - (prev[i] ?? 0));
+            for (let i = 0; i < len; i++) {
+                const d = mel[i] - prev[i];
+                if (d > 0) motion += d;
+            }
             motion = MathUtils.clamp(motion / len * 1.4, 0, 1);
         }
         return {
@@ -522,9 +534,11 @@ class VisualizerEngine {
         }
         if (activeBins > 1) spread = MathUtils.clamp((maxBin - minBin) / 64, 0, 1);
         const confGain = MathUtils.lerp(0.28, 1.0, MathUtils.clamp(pitchConf, 0, 1));
+        // Avoid weights.map() allocation – mutate in place
+        for (let i = 0; i < 4; i++) weights[i] *= confGain;
         return {
             shape,
-            weights: weights.map((w) => w * confGain),
+            weights,
             spread
         };
     }
@@ -552,8 +566,8 @@ class VisualizerEngine {
             if (!Number.isFinite(value) || !Number.isFinite(bin)) continue;
             peakCount += 1;
             peakSum += value;
-            minBin = Math.min(minBin, bin);
-            maxBin = Math.max(maxBin, bin);
+            if (bin < minBin) minBin = bin;
+            if (bin > maxBin) maxBin = bin;
         }
         const peakMean = peakCount ? peakSum / peakCount : 0;
         const peakCluster = peakCount ? MathUtils.clamp(1 - (maxBin - minBin) / 63, 0, 1) : 0;
@@ -569,46 +583,47 @@ class VisualizerEngine {
         }[S?.timbre] ?? 0.5);
         const depthBias = MathUtils.clamp((sm.centroidNorm - 0.5) * 2.0, -1, 1);
         const peakAnalysis = this._analyzePeaks(S?.peaks, conf);
-        const melBands = [
-            MathUtils.clamp(melStats.lowMidLift, 0, 1),
-            MathUtils.clamp(melStats.presence, 0, 1),
-            MathUtils.clamp(0.5 * melStats.motion + 0.5 * sm.centroidNorm, 0, 1),
-            MathUtils.clamp(0.55 * sm.histOnset + 0.45 * transient, 0, 1)
-        ];
         const onsetExcite = MathUtils.clamp(0.7 * transient + 0.3 * sm.histOnset, 0, 1);
 
-        return {
-            active: sm.pitch > 40 && conf > 0.08,
-            y: yFromPitch + memoryOffset * 0.35,
-            followY: MathUtils.lerp(0.05, 0.2, conf),
-            pitchNorm: pitchMix,
-            radius: 0.82 + loudMix * 1.75 + transient * 0.2 + melStats.lowMidLift * 0.08,
-            transient,
-            stability: conf,
-            sisterRichness,
-            centroidNorm: sm.centroidNorm,
-            peakSpread: sm.peakSpread,
-            melPresence: melStats.presence,
-            harmonicRichness,
-            peakShape: peakAnalysis.shape,
-            peakWeights: peakAnalysis.weights,
-            melBands,
-            onsetExcite,
-            pitchConf: conf,
-            depthBias,
-            depthSpread: MathUtils.clamp(0.2 + 0.4 * melStats.motion + 0.22 * centroidSwing + 0.18 * peakAnalysis.spread, 0, 1),
-            ringTilt: MathUtils.lerp(-VISUAL_SCENE_CONFIG.ringTiltMax, VISUAL_SCENE_CONFIG.ringTiltMax, sm.centroidNorm),
-            surfaceHardness: MathUtils.clamp(0.45 * conf + 0.35 * timbreSoftness + 0.2 * (1 - sm.histOnset), 0.2, 0.95)
-        };
+        // Write into reused object – no allocation per frame
+        const ls = this._liveState;
+        ls.active = sm.pitch > 40 && conf > 0.08;
+        ls.y = yFromPitch + memoryOffset * 0.35;
+        ls.followY = MathUtils.lerp(0.05, 0.2, conf);
+        ls.pitchNorm = pitchMix;
+        ls.radius = 0.82 + loudMix * 1.75 + transient * 0.2 + melStats.lowMidLift * 0.08;
+        ls.transient = transient;
+        ls.stability = conf;
+        ls.sisterRichness = sisterRichness;
+        ls.centroidNorm = sm.centroidNorm;
+        ls.peakSpread = sm.peakSpread;
+        ls.melPresence = melStats.presence;
+        ls.harmonicRichness = harmonicRichness;
+        ls.peakShape = peakAnalysis.shape;
+        ls.peakWeights = peakAnalysis.weights;
+        // Inline melBands to avoid array allocation
+        if (!ls.melBands) ls.melBands = [0, 0, 0, 0];
+        ls.melBands[0] = MathUtils.clamp(melStats.lowMidLift, 0, 1);
+        ls.melBands[1] = MathUtils.clamp(melStats.presence, 0, 1);
+        ls.melBands[2] = MathUtils.clamp(0.5 * melStats.motion + 0.5 * sm.centroidNorm, 0, 1);
+        ls.melBands[3] = MathUtils.clamp(0.55 * sm.histOnset + 0.45 * transient, 0, 1);
+        ls.onsetExcite = onsetExcite;
+        ls.pitchConf = conf;
+        ls.depthBias = depthBias;
+        ls.depthSpread = MathUtils.clamp(0.2 + 0.4 * melStats.motion + 0.22 * centroidSwing + 0.18 * peakAnalysis.spread, 0, 1);
+        ls.ringTilt = MathUtils.lerp(-VISUAL_SCENE_CONFIG.ringTiltMax, VISUAL_SCENE_CONFIG.ringTiltMax, sm.centroidNorm);
+        ls.surfaceHardness = MathUtils.clamp(0.45 * conf + 0.35 * timbreSoftness + 0.2 * (1 - sm.histOnset), 0.2, 0.95);
+        return ls;
     }
 
     renderFrame() {
         const dt = Math.min(this.clock.getDelta(), 0.033);
+        this._lastDt = dt;
         if (this.controls && (this.controls.enableDamping || this.controls.autoRotate)) this.controls.update();
         this.audio.update(dt);
 
         const liveState = this.buildLiveState();
-        this.systems.rings.update(liveState);
+        this.systems.rings.update(liveState, dt);
 
         this.renderer.render(this.scene, this.camera);
     }

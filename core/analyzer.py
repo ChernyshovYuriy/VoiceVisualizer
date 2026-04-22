@@ -2,6 +2,11 @@
 analyzer.py
 Background thread that consumes audio chunks and computes per-frame features.
 Emits results via a caller-supplied callback (thread-safe via Qt signal bridge).
+
+Performance improvements:
+- rms computed once (was 3×)
+- mel filterbank kept float32 end-to-end (avoids float64 dot product)
+- mel_fb cast to float32 at module init
 """
 
 from __future__ import annotations
@@ -24,8 +29,8 @@ N_MELS = 64
 FMIN = 80.0
 FMAX = 4_000.0
 
-# Build the mel filterbank once (shape: N_MELS × (FRAME_LENGTH//2 + 1))
-_MEL_FB = librosa.filters.mel(sr=SR, n_fft=FRAME_LENGTH, n_mels=N_MELS, fmin=FMIN, fmax=FMAX)
+# Build the mel filterbank once – keep float32 to avoid float64 dot product
+_MEL_FB = librosa.filters.mel(sr=SR, n_fft=FRAME_LENGTH, n_mels=N_MELS, fmin=FMIN, fmax=FMAX).astype(np.float32)
 
 # Hanning window for STFT
 _WINDOW = np.hanning(FRAME_LENGTH).astype(np.float32)
@@ -138,23 +143,18 @@ class Analyzer:
     def _process(self, frame: np.ndarray) -> None:
         # Defend feature extraction from invalid audio values.
         frame = np.nan_to_num(frame, nan=0.0, posinf=1.0, neginf=-1.0).astype(np.float32, copy=False)
-
-        frame = np.clip(frame, -1.0, 1.0)  # ← (prevents huge RMS)
+        frame = np.clip(frame, -1.0, 1.0)
 
         spectrum = np.abs(np.fft.rfft(frame * _WINDOW, n=FRAME_LENGTH)).astype(np.float32)
-        mel = (_MEL_FB @ spectrum).astype(np.float32)
+        mel = (_MEL_FB @ spectrum)  # float32 @ float32 → float32
 
-        # ── Per-frame relative normalization ──────────────────
-        # Normalize mel to spectral SHAPE (peak bin = 1.0) then
-        # scale by loudness so quiet frames are dimmer.
-        # This gives proper contrast between frequency bands
-        # instead of saturating everything to ~1.0.
         mel_peak = float(np.max(mel))
         if mel_peak > 1e-6:
             mel_shape = (mel / mel_peak).astype(np.float32)
         else:
             mel_shape = np.zeros(N_MELS, dtype=np.float32)
 
+        # Compute rms ONCE
         rms = float(np.sqrt(np.mean(frame ** 2)))
         loudness_db = 20.0 * math.log10(rms + 1e-10)
 
@@ -178,22 +178,15 @@ class Analyzer:
 
         pitch_conf = self._estimate_pitch_confidence(spectrum, pitch)
 
-        # Stronger gating for quiet signals
-        # Much stricter gating for quiet / unreliable signals
         # Stricter gating: reject quiet or low-confidence pitches
-        rms = float(np.sqrt(np.mean(frame ** 2)))
         if pitch_conf < 0.25 or rms < 0.02 or not np.isfinite(pitch):
             pitch = float("nan")
             pitch_conf = 0.0
 
-        rms = float(np.sqrt(np.mean(frame ** 2)))
-        loudness_db = 20.0 * math.log10(rms + 1e-10)
-
         spec_sum = float(np.sum(spectrum))
         centroid_hz = float(np.dot(_FREQS, spectrum) / (spec_sum + 1e-10))
 
-        # Improved onset: boost when coming from near-silence
-        # Onset detection - more responsive after silence
+        # Onset detection – more responsive after silence
         delta = np.maximum(mel_norm - self._prev_mel, 0.0)
         onset_raw = float(np.mean(delta))
         prev_mean = float(np.mean(self._prev_mel))

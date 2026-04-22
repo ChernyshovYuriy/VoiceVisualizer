@@ -1,6 +1,6 @@
 """
 buffer.py
-Thread-safe rolling buffer that stores the last N analysis frames.
+Thread-safe rolling buffer – O(1) push via circular index (no per-frame copy).
 """
 
 import numpy as np
@@ -12,9 +12,7 @@ N_MELS = 64     # mel frequency bins
 
 class RollingBuffer:
     """
-    Stores the most recent N_TIME analysis frames.
-    All reads/writes are protected by a lock so the audio worker and the
-    Qt render timer can access it safely from different threads.
+    Circular buffer – push is O(1); snapshot returns a time-ordered view copy.
     """
 
     def __init__(self, n_time: int = N_TIME, n_mels: int = N_MELS) -> None:
@@ -24,9 +22,10 @@ class RollingBuffer:
         self._pitch = np.full(n_time, np.nan, dtype=np.float32)
         self._loudness = np.full(n_time, -80.0, dtype=np.float32)
         self._centroid = np.zeros(n_time, dtype=np.float32)
+        self._head = 0          # next write position
         self._lock = threading.Lock()
 
-    # ── write ─────────────────────────────────────────────────────────────────
+    # ── write ──────────────────────────────────────────────────────────────
 
     def push(
         self,
@@ -36,16 +35,12 @@ class RollingBuffer:
         centroid_hz: float,
     ) -> None:
         with self._lock:
-            # Shift everything left (oldest frame drops off)
-            self._mel[:-1] = self._mel[1:]
-            self._pitch[:-1] = self._pitch[1:]
-            self._loudness[:-1] = self._loudness[1:]
-            self._centroid[:-1] = self._centroid[1:]
-            # Append newest at the right end
-            self._mel[-1] = mel_frame
-            self._pitch[-1] = pitch
-            self._loudness[-1] = loudness_db
-            self._centroid[-1] = centroid_hz
+            idx = self._head % self.n_time
+            self._mel[idx] = mel_frame
+            self._pitch[idx] = pitch
+            self._loudness[idx] = loudness_db
+            self._centroid[idx] = centroid_hz
+            self._head += 1
 
     def reset(self) -> None:
         with self._lock:
@@ -53,23 +48,28 @@ class RollingBuffer:
             self._pitch[:] = np.nan
             self._loudness[:] = -80.0
             self._centroid[:] = 0.0
+            self._head = 0
 
-    # ── read ──────────────────────────────────────────────────────────────────
+    # ── read ───────────────────────────────────────────────────────────────
 
-    def snapshot(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Return copies of (mel, pitch, loudness_db, centroid_hz)."""
+    def snapshot(self) -> tuple:
+        """Return copies of (mel, pitch, loudness_db, centroid_hz) in chronological order."""
         with self._lock:
+            n = self.n_time
+            start = self._head % n
+            idx = np.arange(start, start + n) % n
             return (
-                self._mel.copy(),
-                self._pitch.copy(),
-                self._loudness.copy(),
-                self._centroid.copy(),
+                self._mel[idx].copy(),
+                self._pitch[idx].copy(),
+                self._loudness[idx].copy(),
+                self._centroid[idx].copy(),
             )
 
     @property
     def latest_pitch(self) -> float:
         with self._lock:
-            for p in reversed(self._pitch):
+            for i in range(self.n_time):
+                p = self._pitch[(self._head - 1 - i) % self.n_time]
                 if not np.isnan(p) and p > 0:
                     return float(p)
             return float("nan")
@@ -77,9 +77,9 @@ class RollingBuffer:
     @property
     def latest_loudness(self) -> float:
         with self._lock:
-            return float(self._loudness[-1])
+            return float(self._loudness[(self._head - 1) % self.n_time])
 
     @property
     def latest_centroid(self) -> float:
         with self._lock:
-            return float(self._centroid[-1])
+            return float(self._centroid[(self._head - 1) % self.n_time])

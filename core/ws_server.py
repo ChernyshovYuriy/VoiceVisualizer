@@ -1,6 +1,8 @@
 """
 ws_server.py
-Asyncio WebSocket server — pushes analysis frames to connected browser clients at 30 fps.
+Push-on-update WebSocket server — sends a frame immediately when LiveState
+is updated (triggered by the analyzer), rather than polling at a fixed rate.
+This removes the 1/30 s polling delay and matches the actual analysis cadence.
 """
 
 from __future__ import annotations
@@ -29,25 +31,55 @@ class WSServer:
             )
         self._state = state
         self._thread: threading.Thread | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._clients: set = set()
+        self._lock = threading.Lock()
+        # LiveState calls this after each update_from_frame
+        self._state.on_update = self._notify
 
     def start(self) -> None:
         self._thread = threading.Thread(target=self._run, daemon=True, name="ws-server")
         self._thread.start()
 
     def _run(self) -> None:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(self._serve())
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
+        self._loop.run_until_complete(self._serve())
 
     async def _serve(self) -> None:
         async with websockets.serve(self._handler, HOST, PORT):
             await asyncio.Future()   # run forever
 
     async def _handler(self, websocket) -> None:
+        with self._lock:
+            self._clients.add(websocket)
         try:
-            while True:
-                payload = json.dumps(self._state.snapshot())
-                await websocket.send(payload)
-                await asyncio.sleep(1 / 30)
+            # Send current state immediately on connect
+            await websocket.send(json.dumps(self._state.snapshot()))
+            await websocket.wait_closed()
+        except Exception:
+            pass
+        finally:
+            with self._lock:
+                self._clients.discard(websocket)
+
+    def _notify(self) -> None:
+        """Called from analyzer thread after each frame. Schedules a broadcast."""
+        loop = self._loop
+        if loop is None or not loop.is_running():
+            return
+        payload = json.dumps(self._state.snapshot())
+        loop.call_soon_threadsafe(self._broadcast, payload)
+
+    def _broadcast(self, payload: str) -> None:
+        with self._lock:
+            clients = list(self._clients)
+        for ws in clients:
+            asyncio.ensure_future(self._send_safe(ws, payload))
+
+    @staticmethod
+    async def _send_safe(ws, payload: str) -> None:
+        try:
+            await ws.send(payload)
         except Exception:
             pass
