@@ -196,7 +196,7 @@ class _Smoother:
     def build(self):
         c=self.conf; lm=max(0.,min(1.,0.65*self.ln+0.35*self.en))
         tr=max(0.,min(1.,self.tr*0.8+self.ho*0.2))
-        return dict(active=c>0.08, pn=self.pn, radius=0.76+lm*1.82+tr*0.15,
+        return dict(active=c>0.08, pn=self.pn, radius=0.52+lm*0.48+tr*0.08,
                     fy=_lp(0.05,0.10,c*c), fr=0.14 if lm>0 else 0.06,
                     tr=tr, conf=c, org=max(0.,min(1.,self.en*0.6+tr*0.4)),
                     thick=_lp(0.068,0.038,min(c,1.)))
@@ -272,15 +272,15 @@ class RingWidget(QOpenGLWidget):
         self._live  = live_state
         self._sm    = _Smoother()
         self._dy    = 0.0
-        self._dr    = 1.0
+        self._dr    = 0.65
         self._col   = (0.72, 0.45, 0.22)
         self._t     = 0.0
         self._lt    = None
 
         # Orbit
-        self._yaw   =  30.0
-        self._pitch = -20.0
-        self._dist  =   8.0
+        self._yaw   =  25.0
+        self._pitch =  52.0
+        self._dist  =   7.0
         self._mpos: QPoint | None = None
 
         QTimer(self, interval=16, timeout=self.update).start()
