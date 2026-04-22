@@ -31,10 +31,12 @@ _RING_VERT = """
 layout(location=0) in vec3 aPos;
 layout(location=1) in vec3 aNorm;
 uniform mat4 uMVP;
-uniform mat4 uNorm;
+uniform mat3 uNorm;
 out vec3 vNorm;
+out vec3 vPos;
 void main() {
-    vNorm = mat3(uNorm) * aNorm;
+    vNorm = normalize(uNorm * aNorm);
+    vPos  = aPos;
     gl_Position = uMVP * vec4(aPos, 1.0);
 }
 """
@@ -42,21 +44,28 @@ void main() {
 _RING_FRAG = """
 #version 330 core
 in vec3 vNorm;
+in vec3 vPos;
 out vec4 fragColor;
 uniform vec3  uColor;
 uniform float uOpacity;
 uniform float uFlash;
 uniform float uGlow;
+uniform vec3  uEye;     // camera position in world space
+uniform vec3  uCenter;  // ring center in world space (for view dir)
 void main() {
     vec3 n   = normalize(vNorm);
-    // Rim glow: bright at silhouette (where normal faces camera, n.z~0)
-    float rim  = 1.0 - abs(n.z);
-    float body = exp(-rim * 2.0);
-    float halo = exp(-rim * 0.7);
-    float alpha = (body * 0.55 + halo * 0.38 + uGlow * 0.07) * uOpacity;
+    vec3 view = normalize(uEye - uCenter);
+    // Rim: angle between surface normal and view direction
+    float ndotv = abs(dot(n, view));
+    float rim   = 1.0 - ndotv;
+    // Three-layer profile: sharp inner edge + gaussian body + wide halo
+    float inner = smoothstep(0.72, 0.40, ndotv);
+    float body  = exp(-pow(rim * 3.2, 2.0));
+    float halo  = exp(-pow(rim * 1.1, 2.0));
+    float alpha = (inner * 0.50 + body * 0.38 + halo * 0.18) * uOpacity;
     if (alpha < 0.003) discard;
     vec3 col = mix(uColor, vec3(1.0, 0.95, 0.85), uFlash * 0.28);
-    col += uGlow * vec3(0.07, 0.03, 0.0);
+    col = mix(col, col * 1.2 + vec3(0.05,0.02,0.0), inner * 0.5);
     fragColor = vec4(col, alpha);
 }
 """
@@ -122,7 +131,7 @@ def _cm_scale(s):
 
 # ── torus mesh ────────────────────────────────────────────────────────────────
 
-def _make_torus(R=1.0, r=0.048, seg=96, tseg=16):
+def _make_torus(R=1.0, r=0.022, seg=120, tseg=18):
     """Float32 array (N,6): position xyz + normal xyz. Ring lies in XZ plane."""
     verts = []
     for i in range(seg):
@@ -359,8 +368,12 @@ class RingWidget(QOpenGLWidget):
             # Normal matrix = transpose of inverse of upper-left 3x3 of model
             norm_m = model.copy()
 
-            GL.glUniformMatrix4fv(_u(self._rp,"uMVP"),  1, True,  mvp.flatten())
-            GL.glUniformMatrix4fv(_u(self._rp,"uNorm"), 1, True, norm_m.flatten())
+            GL.glUniformMatrix4fv(_u(self._rp,"uMVP"),  1, True, mvp.flatten())
+            # Normal matrix: upper-left 3x3 of model (no translation, no scale distortion)
+            nm3 = model[:3,:3].copy()
+            GL.glUniformMatrix3fv(_u(self._rp,"uNorm"), 1, True, nm3.flatten())
+            GL.glUniform3f(_u(self._rp,"uEye"),    *eye)
+            GL.glUniform3f(_u(self._rp,"uCenter"), 0., y_pos, 0.)
 
             dim = 1. if not echo else 0.72
             col = tuple(self._col[k]*dim for k in range(3))
