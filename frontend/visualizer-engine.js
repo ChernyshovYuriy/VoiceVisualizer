@@ -35,7 +35,14 @@ const VISUAL_SCENE_CONFIG = {
     ringSisterShellBoost: 0.78,
     ringMainShellCount: 4,
     ringSisterShellCount: 2,
-    ringSecondaryUpdateDivisor: 2,
+    // Runtime-budget knobs: keep richness bounded to avoid audio/render contention.
+    ringMainDetailUpdateDivisor: 1,
+    ringSisterDetailUpdateDivisor: 3,
+    ringMainDetailBudget: 1.0,
+    ringSisterDetailBudget: 0.58,
+    ringMaxContourWarp: 0.16,
+    ringSecondaryBandBiasClamp: 0.55,
+    ringSecondaryOnsetClamp: 0.42,
     verticalColorSmoothing: 0.11,
     verticalColorPitchMinY: -3.8,
     verticalColorPitchMaxY: 3.8,
@@ -87,6 +94,10 @@ class RingSystem {
             melBands: new THREE.Vector4(),
             peakShape: new THREE.Vector4(),
             peakWeights: new THREE.Vector4()
+        };
+        this._detailCache = {
+            main: { variation: 0.1, contour: VISUAL_SCENE_CONFIG.ringContourDepth, bandBias: 0.2, depthBias: 0.0, harmonicRichness: 0.2, onsetExcite: 0.0, pitchTightness: 0.5 },
+            sister: { variation: 0.08, contour: VISUAL_SCENE_CONFIG.ringContourDepth, bandBias: 0.2, depthBias: 0.0, harmonicRichness: 0.16, onsetExcite: 0.0, pitchTightness: 0.5 }
         };
         this._planeGeometry = new THREE.PlaneGeometry(12, 12);
 
@@ -153,7 +164,8 @@ class RingSystem {
                 uPitchTightness: { value: 0.7 },
                 uOnsetExcite: { value: 0.0 },
                 uShellDepth: { value: 0.0 },
-                uLiteMode: { value: useLite ? 1.0 : 0.0 }
+                uLiteMode: { value: useLite ? 1.0 : 0.0 },
+                uDetailBudget: { value: useLite ? VISUAL_SCENE_CONFIG.ringSisterDetailBudget : VISUAL_SCENE_CONFIG.ringMainDetailBudget }
             },
             vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
             fragmentShader: `
@@ -183,6 +195,7 @@ class RingSystem {
                 uniform float uOnsetExcite;
                 uniform float uShellDepth;
                 uniform float uLiteMode;
+                uniform float uDetailBudget;
 
                 void main() {
                     vec2 uv = vUv * 2.0 - 1.0;
@@ -192,6 +205,7 @@ class RingSystem {
                     float p1 = sin(theta * (5.0 + uPeakShape.y * 11.0) + uRingPhase * 1.2 + uTime * 0.35) * (1.0 - uLiteMode * 0.45);
                     float p2 = sin(theta * (8.0 + uPeakShape.z * 15.0) - uRingPhase * 0.7 + uTime * 0.25) * (1.0 - uLiteMode * 0.7);
                     float peakContour = p0 * uPeakWeights.x + p1 * uPeakWeights.y + p2 * uPeakWeights.z;
+                    // Cheap richness approximation: 2-3 low-frequency contour terms instead of dense geometry.
                     float harmonicA = sin(theta * (4.0 + uHarmonicRichness * 5.0) + uTime * 1.1 + uRingPhase);
                     float harmonicB = sin(theta * (8.0 + uHarmonicRichness * 8.0) - uTime * 0.8 + uRingPhase * 1.7) * (1.0 - uLiteMode * 0.65);
                     float melTexturing = sin(theta * (14.0 + uMelBands.x * 10.0) + uTime * 0.18) * uMelBands.y * (1.0 - uLiteMode * 0.7);
@@ -200,7 +214,8 @@ class RingSystem {
                     float rippleA = harmonicA * uVariation;
                     float rippleB = harmonicB * (uContour * 0.65);
                     float structuredWarp = peakContour * (0.045 * tighten) + melTexturing * 0.02 + onsetPulse * 0.015;
-                    float contourWarp = 1.0 + (rippleA * 0.02 + rippleB * 0.015 + structuredWarp) * (0.8 + uLayerRole * 0.4);
+                    float contourDelta = (rippleA * 0.02 + rippleB * 0.015 + structuredWarp) * (0.8 + uLayerRole * 0.4) * uDetailBudget;
+                    float contourWarp = 1.0 + clamp(contourDelta, -${VISUAL_SCENE_CONFIG.ringMaxContourWarp.toFixed(3)}, ${VISUAL_SCENE_CONFIG.ringMaxContourWarp.toFixed(3)});
                     float dist = length(uv) * 4.0 * contourWarp;
                     float ringDist = abs(dist - uRadius);
 
@@ -349,6 +364,27 @@ class RingSystem {
         this.displayColor.lerp(targetColor, VISUAL_SCENE_CONFIG.verticalColorSmoothing);
 
         const sisterCoupling = MathUtils.lerp(0.96, 1.0, liveState?.sisterRichness ?? 0);
+        const updateMainDetail = this._frameCount % VISUAL_SCENE_CONFIG.ringMainDetailUpdateDivisor === 0;
+        const updateSisterDetail = this._frameCount % VISUAL_SCENE_CONFIG.ringSisterDetailUpdateDivisor === 0;
+        if (updateMainDetail) {
+            this._detailCache.main.variation = variation;
+            this._detailCache.main.contour = contour;
+            this._detailCache.main.bandBias = liveState?.centroidNorm ?? 0.2;
+            this._detailCache.main.depthBias = depthBias;
+            this._detailCache.main.harmonicRichness = harmonicRichness;
+            this._detailCache.main.onsetExcite = onsetExcite;
+            this._detailCache.main.pitchTightness = pitchTightness;
+        }
+        if (updateSisterDetail) {
+            // Sisters intentionally run on a slower/cheaper path to preserve playback stability.
+            this._detailCache.sister.variation = variation * 0.82;
+            this._detailCache.sister.contour = contour;
+            this._detailCache.sister.bandBias = Math.min(liveState?.centroidNorm ?? 0.2, VISUAL_SCENE_CONFIG.ringSecondaryBandBiasClamp);
+            this._detailCache.sister.depthBias = depthBias * 0.72;
+            this._detailCache.sister.harmonicRichness = harmonicRichness * VISUAL_SCENE_CONFIG.ringSisterDetailBudget;
+            this._detailCache.sister.onsetExcite = Math.min(onsetExcite, VISUAL_SCENE_CONFIG.ringSecondaryOnsetClamp);
+            this._detailCache.sister.pitchTightness = pitchTightness;
+        }
         this.beam.position.y = this.displayY;
         this.beam.material.color.copy(this.displayColor).multiplyScalar(0.92);
 
@@ -357,8 +393,7 @@ class RingSystem {
             ring.group.position.z = (idx - 2) * VISUAL_SCENE_CONFIG.ringDepthStagger * (liveState?.depthSpread ?? 0.35);
             ring.group.rotation.z = (idx - 2) * (liveState?.ringTilt ?? 0.0);
             const coupledScale = idx === 0 ? 1.0 : sisterCoupling;
-            const isSecondaryPass = idx !== 0;
-            const shouldUpdateDetail = !isSecondaryPass || this._frameCount % VISUAL_SCENE_CONFIG.ringSecondaryUpdateDivisor === 0;
+            const detailState = idx === 0 ? this._detailCache.main : this._detailCache.sister;
             ring.shells.forEach(({ mat, shell }, shellIdx) => {
                 mat.uniforms.uRadius.value = this.displayRadius * ring.radiusScale * coupledScale * shell.radius;
                 mat.uniforms.uFlash.value = this.displayFlash;
@@ -367,15 +402,17 @@ class RingSystem {
                 mat.uniforms.uTime.value += 0.016;
                 mat.uniforms.uRingPhase.value = ring.phase + shellIdx * 0.14;
                 mat.uniforms.uColor.value.copy(this.displayColor).multiplyScalar(ring.toneScale * (1.0 - shellIdx * 0.05));
-                if (!shouldUpdateDetail) return;
-                mat.uniforms.uVariation.value = variation * (idx === 0 ? 1.0 : 0.82);
-                mat.uniforms.uContour.value = contour;
-                mat.uniforms.uBandBias.value = liveState?.centroidNorm ?? 0.2;
-                mat.uniforms.uDepthBias.value = depthBias * (idx === 0 ? 1.0 : 0.72);
+                mat.uniforms.uDetailBudget.value = idx === 0
+                    ? VISUAL_SCENE_CONFIG.ringMainDetailBudget
+                    : VISUAL_SCENE_CONFIG.ringSisterDetailBudget;
+                mat.uniforms.uVariation.value = detailState.variation;
+                mat.uniforms.uContour.value = detailState.contour;
+                mat.uniforms.uBandBias.value = detailState.bandBias;
+                mat.uniforms.uDepthBias.value = detailState.depthBias;
                 mat.uniforms.uHardness.value = hardness;
-                mat.uniforms.uHarmonicRichness.value = harmonicRichness;
-                mat.uniforms.uOnsetExcite.value = onsetExcite * (1.0 - shellIdx * 0.14);
-                mat.uniforms.uPitchTightness.value = pitchTightness;
+                mat.uniforms.uHarmonicRichness.value = detailState.harmonicRichness;
+                mat.uniforms.uOnsetExcite.value = detailState.onsetExcite * (1.0 - shellIdx * 0.14);
+                mat.uniforms.uPitchTightness.value = detailState.pitchTightness;
                 mat.uniforms.uMelBands.value.copy(this._cachedSignalVectors.melBands);
                 mat.uniforms.uPeakShape.value.copy(this._cachedSignalVectors.peakShape);
                 mat.uniforms.uPeakWeights.value.copy(this._cachedSignalVectors.peakWeights);
