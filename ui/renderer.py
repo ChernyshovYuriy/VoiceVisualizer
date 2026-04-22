@@ -48,23 +48,16 @@ uniform vec3  uEye;
 void main() {
     vec3 n = normalize(vWorldNorm);
     vec3 v = normalize(uEye - vWorldPos);
-    vec3 L = normalize(vec3(2.0, 4.0, 3.0));   // key light
-    float ndotL = max(dot(n, L), 0.0);
-    float ndotv = max(dot(n, v), 0.0);
-
-    // Diffuse + specular Phong on tube surface
-    float diff = 0.15 + ndotL * 0.75;
-    vec3 h = normalize(L + v);
-    float spec = pow(max(dot(n, h), 0.0), 48.0) * 0.6;
-
-    // Fresnel rim glow for the silhouette halo
-    float rim = 1.0 - ndotv;
-    float halo = exp(-pow(rim * 1.4, 2.0)) * 0.3;
-
-    float alpha = clamp((diff * 0.7 + halo + spec) * uOpacity, 0.0, 1.0);
+    float ndotv = abs(dot(n, v));
+    // Bright at silhouette (ndotv~0), dim face-on
+    float rim   = 1.0 - ndotv;
+    float inner = smoothstep(0.65, 0.35, ndotv);
+    float body  = exp(-pow(rim * 3.0, 2.0));
+    float halo  = exp(-pow(rim * 1.2, 2.0));
+    float alpha = (inner * 0.55 + body * 0.35 + halo * 0.15) * uOpacity;
     if (alpha < 0.003) discard;
-    vec3 col = uColor * diff + vec3(spec);
-    col = mix(col, vec3(1.0, 0.95, 0.85), uFlash * 0.35);
+    vec3 col = mix(uColor, vec3(1.0, 0.95, 0.85), uFlash * 0.30);
+    col += inner * vec3(0.08, 0.04, 0.01);
     fragColor = vec4(col, alpha);
 }
 """
@@ -86,9 +79,8 @@ void main() {
 """
 
 # ── verified matrix math ──────────────────────────────────────────────────────
-# Convention: standard row-major, column-vector shader (gl_Position = MVP * v)
-# MVP = P @ V @ M in numpy, upload with transpose=False
-# Verified: ring vertex (0.65,0,0) with eye at (0,5.5,4.3) -> NDC (0.084, 0, 0.97) visible
+# Convention: standard row-major numpy matrices P@V@M, uploaded with transpose=True
+# so OpenGL receives them in column-major order as expected.
 
 def _perspective(fov_deg, aspect, near, far):
     t = math.tan(math.radians(fov_deg) / 2)
@@ -116,7 +108,7 @@ def _scale(s):
 
 # ── torus geometry ────────────────────────────────────────────────────────────
 
-def _torus(R=1.0, r=0.18, seg=96, tseg=32):
+def _torus(R=1.0, r=0.22, seg=120, tseg=40):
     """Torus in XZ plane. Returns float32 (N,6): xyz + normal xyz."""
     rows = []
     for i in range(seg):
@@ -216,9 +208,10 @@ def _ul(p,n): return GL.glGetUniformLocation(p,n)
 # ── ring layout ───────────────────────────────────────────────────────────────
 
 _RINGS = [
-    (0.00, 1.00, 0.90, False),   # main ring
-    (0.00, 0.82, 0.38, True),    # inner echo (smaller)
-    (0.00, 1.18, 0.28, True),    # outer echo (larger)
+    (0.00, 1.00, 0.90, False),
+    (0.00, 0.80, 0.40, True),
+    (0.00, 1.20, 0.30, True),
+    (0.00, 0.62, 0.20, True),
 ]
 
 # ── widget ────────────────────────────────────────────────────────────────────
@@ -243,7 +236,7 @@ class RingWidget(QOpenGLWidget):
 
         # Camera orbit: yaw around Y, pitch above horizon
         self._yaw   = 25.0
-        self._pitch = 28.0   # low angle shows the ring as a 3D torus
+        self._pitch = 30.0
         self._dist  =  7.0
         self._mp: QPoint | None = None
 
@@ -296,7 +289,7 @@ class RingWidget(QOpenGLWidget):
         yr=math.radians(self._yaw); pr=math.radians(self._pitch); d=self._dist
         eye=np.array([d*math.cos(pr)*math.sin(yr), d*math.sin(pr), d*math.cos(pr)*math.cos(yr)],np.float32)
 
-        # Verified convention: P@V@M, transpose=False
+        # Verified convention: P@V@M in numpy row-major, uploaded with transpose=True
         P=_perspective(44.,w/h,0.1,100.)
         V=_look_at(eye,[0,0,0],[0,1,0])
         VP=P@V
@@ -315,10 +308,10 @@ class RingWidget(QOpenGLWidget):
             r=self._dr*scale; yp=self._dy+y_off
             M=_translate(0,yp,0)@_scale(r)
             mvp=(VP@M).astype(np.float32)
-            nm=M[:3,:3].copy().astype(np.float32)   # normal matrix (uniform scale, no need for inverse)
+            nm=np.linalg.inv(M[:3,:3]).T.astype(np.float32)
 
-            GL.glUniformMatrix4fv(_ul(self._rp,"uMVP"),      1, False, mvp.flatten())
-            GL.glUniformMatrix3fv(_ul(self._rp,"uNormalMat"),1, False, nm.flatten())
+            GL.glUniformMatrix4fv(_ul(self._rp,"uMVP"),      1, True, mvp.flatten())
+            GL.glUniformMatrix3fv(_ul(self._rp,"uNormalMat"),1, True, nm.flatten())
             GL.glUniform3f(_ul(self._rp,"uEye"),  *eye)
             dim=1. if not echo else .72
             GL.glUniform3f(_ul(self._rp,"uColor"), *(self._col[k]*dim for k in range(3)))
