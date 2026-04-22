@@ -383,21 +383,21 @@
             const peakIntensity = peakCount ? peakSum / peakCount : 0;
             const spread = peakCount > 1 ? (maxBin - minBin) / 63 : 0;
 
-            const pf = MathUtils.lerp(0.04, 0.22, conf * conf);
+            const pf = MathUtils.lerp(0.18, 0.55, conf * conf);
             sm.pitch        = MathUtils.lerp(sm.pitch, targetPitch, pf);
-            sm.loud         = MathUtils.lerp(sm.loud, S.loudness, 0.15);
-            sm.onset        = MathUtils.lerp(sm.onset, S.onset, 0.4);
-            sm.energy       = MathUtils.lerp(sm.energy, S.energy, 0.2);
-            sm.pitchConf    = MathUtils.lerp(sm.pitchConf, conf, 0.18);
-            sm.pitchNorm    = MathUtils.lerp(sm.pitchNorm, hzToNorm(sm.pitch), MathUtils.lerp(0.05, 0.22, conf));
+            sm.loud         = MathUtils.lerp(sm.loud, S.loudness, 0.35);
+            sm.onset        = MathUtils.lerp(sm.onset, S.onset, 0.7);
+            sm.energy       = MathUtils.lerp(sm.energy, S.energy, 0.45);
+            sm.pitchConf    = MathUtils.lerp(sm.pitchConf, conf, 0.4);
+            sm.pitchNorm    = MathUtils.lerp(sm.pitchNorm, hzToNorm(sm.pitch), MathUtils.lerp(0.18, 0.55, conf));
             sm.loudNorm     = MathUtils.clamp((sm.loud + 58) / 38, 0, 1);
             sm.energyNorm   = MathUtils.clamp(sm.energy, 0, 1);
-            sm.centroidNorm = MathUtils.lerp(sm.centroidNorm, MathUtils.clamp((S.centroid - 250) / 3600, 0, 1), 0.16);
-            sm.stability    = MathUtils.lerp(sm.stability, conf, 0.2);
-            sm.peakSpread   = MathUtils.lerp(sm.peakSpread, spread, 0.2);
-            sm.histPitchNorm = MathUtils.lerp(sm.histPitchNorm, hzToNorm(histPitch > 40 ? histPitch : sm.pitch), 0.12);
-            sm.histLoudNorm  = MathUtils.lerp(sm.histLoudNorm, MathUtils.clamp((histLoud + 58) / 38, 0, 1), 0.12);
-            sm.histOnset     = MathUtils.lerp(sm.histOnset, MathUtils.clamp(histOnset, 0, 1), 0.22);
+            sm.centroidNorm = MathUtils.lerp(sm.centroidNorm, MathUtils.clamp((S.centroid - 250) / 3600, 0, 1), 0.35);
+            sm.stability    = MathUtils.lerp(sm.stability, conf, 0.4);
+            sm.peakSpread   = MathUtils.lerp(sm.peakSpread, spread, 0.4);
+            sm.histPitchNorm = MathUtils.lerp(sm.histPitchNorm, hzToNorm(histPitch > 40 ? histPitch : sm.pitch), 0.25);
+            sm.histLoudNorm  = MathUtils.lerp(sm.histLoudNorm, MathUtils.clamp((histLoud + 58) / 38, 0, 1), 0.25);
+            sm.histOnset     = MathUtils.lerp(sm.histOnset, MathUtils.clamp(histOnset, 0, 1), 0.45);
 
             if (S.onset > 0.22 || peakIntensity > 0.42) {
                 const pf2 = MathUtils.clamp(0.45 * S.onset + 0.55 * peakIntensity, 0, 1);

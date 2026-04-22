@@ -29,11 +29,11 @@ var CFG = {
     echoScale1:     0.93,
     echoScale2:     0.87,
     // motion easing
-    yAttack:        0.18,
-    yRelease:       0.07,
-    rAttack:        0.18,
-    rRelease:       0.075,
-    flashDecay:     0.22,
+    yAttack:        0.42,
+    yRelease:       0.08,
+    rAttack:        0.42,
+    rRelease:       0.09,
+    flashDecay:     0.55,
     // pitch field
     yMin: -3.6,
     yMax:  3.6,
@@ -242,7 +242,7 @@ class RingSystem {
         // Color from pitch
         const col = samplePalette(M.clamp(live?.pitchNorm ?? 0.5, 0, 1));
         this._targetCol.setRGB(col.r, col.g, col.b);
-        this.dispColor.lerp(this._targetCol, 0.09);
+        this.dispColor.lerp(this._targetCol, 0.28);
 
         // Organic warp: mild, only from energy+onset
         const organic = M.clamp((live?.energy ?? 0) * 0.6 + (live?.onsetExcite ?? 0) * 0.4, 0, 1);
@@ -317,24 +317,25 @@ class VisualizerEngine {
         const LOG_RANGE = Math.log(2093.0) - LOG_LO;
         const hzNorm = hz => M.clamp((Math.log(M.clamp(hz, 65.4, 2093.0)) - LOG_LO) / LOG_RANGE, 0, 1);
 
-        const pitchNorm = M.lerp(
-            M.lerp(sm.histPitchNorm, sm.pitchNorm, conf),
-            hzNorm(sm.pitch),
-            0.3
-        );
-        const loudMix = M.clamp(0.6 * sm.loudNorm + 0.3 * sm.energyNorm + 0.1 * sm.histLoudNorm, 0, 1);
-        const transient = M.clamp(this.audio.transientFlash * 0.8 + sm.histOnset * 0.3, 0, 1);
+        // Use raw pitch directly when confident — avoids double-smoothing lag.
+        const rawNorm   = S.pitch > 40 ? hzNorm(S.pitch) : sm.pitchNorm;
+        const pitchNorm = M.lerp(sm.pitchNorm, rawNorm, conf);
+
+        // Raw loudness for radius — faster response
+        const rawLoud  = M.clamp((S.loudness + 58) / 38, 0, 1);
+        const loudMix  = M.clamp(0.7 * rawLoud + 0.3 * sm.energyNorm, 0, 1);
+        const transient = M.clamp(this.audio.transientFlash * 0.9 + sm.histOnset * 0.2, 0, 1);
 
         const ls = this._live;
-        ls.active     = sm.pitch > 40 && conf > 0.08;
-        ls.y          = M.lerp(CFG.yMin, CFG.yMax, pitchNorm);
-        ls.followY    = M.lerp(0.05, 0.20, conf);
-        ls.pitchNorm  = pitchNorm;
-        ls.radius     = 0.76 + loudMix * 1.82 + transient * 0.18;
-        ls.transient  = transient;
-        ls.stability  = conf;
-        ls.energy     = sm.energyNorm;
-        ls.onsetExcite = M.clamp(0.7 * transient + 0.3 * sm.histOnset, 0, 1);
+        ls.active      = S.pitch > 40 && conf > 0.08;
+        ls.y           = M.lerp(CFG.yMin, CFG.yMax, pitchNorm);
+        ls.followY     = M.lerp(0.25, 0.65, conf);
+        ls.pitchNorm   = pitchNorm;
+        ls.radius      = 0.76 + loudMix * 1.82 + transient * 0.18;
+        ls.transient   = transient;
+        ls.stability   = conf;
+        ls.energy      = M.clamp(S.energy, 0, 1);
+        ls.onsetExcite = M.clamp(0.8 * transient + 0.2 * sm.histOnset, 0, 1);
         return ls;
     }
 

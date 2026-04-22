@@ -1,0 +1,13 @@
+{
+  "source_path": "/home/yurii/Music/Tarja_Angels.mp3",
+  "file_hash": "2b06c28d193c5141c070f52b",
+  "duration_seconds": 240.00145124716553,
+  "separator_backend": "demucs",
+  "created_at": "2026-04-16T00:56:27.928414+00:00",
+  "outputs": {
+    "original_audio": "/home/yurii/.voice_music_visualizer/cache/2b06c28d193c5141c070f52b/original_audio.wav",
+    "vocals": "/home/yurii/.voice_music_visualizer/cache/2b06c28d193c5141c070f52b/vocals.wav",
+    "accompaniment": "/home/yurii/.voice_music_visualizer/cache/2b06c28d193c5141c070f52b/accompaniment.wav",
+    "meta": "/home/yurii/.voice_music_visualizer/cache/2b06c28d193c5141c070f52b/meta.json"
+  }
+}

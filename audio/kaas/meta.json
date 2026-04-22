@@ -1,0 +1,13 @@
+{
+  "source_path": "/home/yurii/Videos/kaas/KennedyRose.mp4",
+  "file_hash": "a642eb18cb6a880bb09ff832",
+  "duration_seconds": 207.87201814058957,
+  "separator_backend": "demucs",
+  "created_at": "2026-03-29T20:45:57.471968+00:00",
+  "outputs": {
+    "original_audio": "/home/yurii/.voice_music_visualizer/cache/a642eb18cb6a880bb09ff832/original_audio.wav",
+    "vocals": "/home/yurii/.voice_music_visualizer/cache/a642eb18cb6a880bb09ff832/vocals.wav",
+    "accompaniment": "/home/yurii/.voice_music_visualizer/cache/a642eb18cb6a880bb09ff832/accompaniment.wav",
+    "meta": "/home/yurii/.voice_music_visualizer/cache/a642eb18cb6a880bb09ff832/meta.json"
+  }
+}
