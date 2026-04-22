@@ -14,3 +14,5 @@ demucs
 # Fallback backend (CLI):
 spleeter
 pytest
+moderngl
+moderngl-window

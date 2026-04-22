@@ -9,7 +9,7 @@ from __future__ import annotations
 import webbrowser
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal, Slot, QSettings, QUrl
+from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal, Slot, QSettings
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QComboBox,
@@ -29,9 +29,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ui.renderer import RingWidget
+
 try:
     from PySide6.QtWebEngineWidgets import QWebEngineView
     from PySide6.QtWebEngineCore import QWebEngineSettings
+
     HAS_WEBENGINE = True
 except ImportError:
     HAS_WEBENGINE = False
@@ -41,7 +44,6 @@ from core.buffer import RollingBuffer
 from core.analyzer import Analyzer, FrameInfo
 from core.live_state import LiveState
 from core.preprocess import PreparedMedia, Preprocessor
-from core.ws_server import WSServer
 
 _ACCEPT = " ".join(f"*{e}" for e in sorted(AUDIO_EXT | VIDEO_EXT))
 _FILTER = f"Audio / Video ({_ACCEPT})"
@@ -51,18 +53,18 @@ _SETTINGS_APP = "VoiceMusicVisualizer"
 _LAST_OPEN_VOCALS_DIR_KEY = "last_open_vocals_dir"
 
 # ── Design tokens ──────────────────────────────────────────────────────────────
-_BG      = "#07111e"
+_BG = "#07111e"
 _SURFACE = "#0c1a2e"
-_PANEL   = "#0f2039"
-_BORDER  = "#172d47"
+_PANEL = "#0f2039"
+_BORDER = "#172d47"
 _BORDER2 = "#1e3d5e"
-_ACCENT  = "#3b82f6"
+_ACCENT = "#3b82f6"
 _ACCENT2 = "#60a5fa"
-_TEXT    = "#d8e8f8"
+_TEXT = "#d8e8f8"
 _SUBTEXT = "#4e6d8a"
-_AMBER   = "#f59e0b"
-_RED     = "#ef4444"
-_MONO    = "'JetBrains Mono','Fira Code','Consolas',monospace"
+_AMBER = "#f59e0b"
+_RED = "#ef4444"
+_MONO = "'JetBrains Mono','Fira Code','Consolas',monospace"
 
 APP_STYLE = f"""
 QMainWindow, QWidget {{
@@ -223,10 +225,10 @@ class _PrepareWorker(QObject):
     failed = Signal(str)
 
     def __init__(
-        self,
-        source_path: Path | None,
-        prepared_media: PreparedMedia | None,
-        analysis_mode: str,
+            self,
+            source_path: Path | None,
+            prepared_media: PreparedMedia | None,
+            analysis_mode: str,
     ) -> None:
         super().__init__()
         self._source_path = source_path
@@ -310,11 +312,7 @@ class MainWindow(QMainWindow):
         self._preprocessor = Preprocessor()
         self._settings = QSettings(_SETTINGS_ORG, _SETTINGS_APP)
 
-        try:
-            self._ws = WSServer(self._live)
-            self._ws.start()
-        except RuntimeError as e:
-            QMessageBox.warning(self, "WS server", str(e))
+        self._ring_widget: RingWidget | None = None
 
         self._bridge.frame_ready.connect(self._on_frame)
         self._build_menu()
@@ -398,28 +396,8 @@ class MainWindow(QMainWindow):
         vbox.addWidget(tb_wrap)
 
         # ── visualizer ───────────────────────────────────────────────────────
-        if HAS_WEBENGINE:
-            self._view = QWebEngineView()
-            self._view.setStyleSheet(f"background:{_BG};")
-            page = self._view.page()
-            settings = page.settings()
-            settings.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True)
-            settings.setAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled, True)
-            self._view.load(QUrl.fromLocalFile(str(_HTML.resolve())))
-            vbox.addWidget(self._view, stretch=1)
-        else:
-            placeholder = QLabel(
-                "3D visualizer opens in your browser.\n"
-                "Install PySide6-WebEngine to embed it here:\n"
-                "  pip install PySide6-WebEngine"
-            )
-            placeholder.setAlignment(Qt.AlignCenter)
-            placeholder.setStyleSheet(
-                f"color:{_SUBTEXT}; font-size:14px; "
-                f"background:{_BG}; border:1px solid {_BORDER}; border-radius:8px;"
-            )
-            vbox.addWidget(placeholder, stretch=1)
-            QTimer.singleShot(800, self._open_browser)
+        self._ring_widget = RingWidget(self._live, parent=root)
+        vbox.addWidget(self._ring_widget, stretch=1)
 
         # ── seek bar ─────────────────────────────────────────────────────────
         sk_wrap = QWidget()
@@ -587,13 +565,14 @@ class MainWindow(QMainWindow):
         return str(self._mode.currentData())
 
     def _start_prepare_worker(
-        self,
-        *,
-        source_path: Path | None,
-        prepared_media: PreparedMedia | None,
+            self,
+            *,
+            source_path: Path | None,
+            prepared_media: PreparedMedia | None,
     ) -> None:
         mode_label = "vocals" if self._analysis_mode() == "vocals" else "full mix"
-        source_name = source_path.name if source_path else (prepared_media.source_path.name if prepared_media else "media")
+        source_name = source_path.name if source_path else (
+            prepared_media.source_path.name if prepared_media else "media")
         self._set_file_label(f"Preparing {mode_label} for {source_name}…", "blue")
         self._btn_open.setEnabled(False)
         self._btn_open_pair.setEnabled(False)
