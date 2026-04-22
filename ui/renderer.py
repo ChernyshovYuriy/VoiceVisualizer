@@ -359,8 +359,8 @@ class RingWidget(QOpenGLWidget):
             # Normal matrix = transpose of inverse of upper-left 3x3 of model
             norm_m = model.copy()
 
-            GL.glUniformMatrix4fv(_u(self._rp,"uMVP"),  1, False, mvp.flatten())
-            GL.glUniformMatrix4fv(_u(self._rp,"uNorm"), 1, False, norm_m.flatten())
+            GL.glUniformMatrix4fv(_u(self._rp,"uMVP"),  1, True,  mvp.flatten())
+            GL.glUniformMatrix4fv(_u(self._rp,"uNorm"), 1, True, norm_m.flatten())
 
             dim = 1. if not echo else 0.72
             col = tuple(self._col[k]*dim for k in range(3))
