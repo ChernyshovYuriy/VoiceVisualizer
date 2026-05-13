@@ -35,6 +35,7 @@ class LiveState:
         self.energy: float = 0.0
         self.pitch_confidence: float = 0.0
         self.peaks: list[dict] = []
+        self.frame_id: int = 0  # monotonic; bumped on each update_from_frame
 
         self._mel_history: list[list[float]] = []
         self._pitch_history: list[float] = []
@@ -55,6 +56,7 @@ class LiveState:
             self.energy = 0.0
             self.pitch_confidence = 0.0
             self.peaks = []
+            self.frame_id = 0
             self._mel_history.clear()
             self._pitch_history.clear()
             self._loudness_history.clear()
@@ -87,6 +89,7 @@ class LiveState:
             self._ring_append(self._loudness_history, self.loudness, _SCALAR_HISTORY)
             self._ring_append(self._centroid_history, self.centroid, _SCALAR_HISTORY)
             self._ring_append(self._onset_history, self.onset, _SCALAR_HISTORY)
+            self.frame_id += 1
 
         # Notify outside the lock so WSServer can snapshot without deadlock
         cb = self.on_update
@@ -123,4 +126,5 @@ class LiveState:
                 "loudHist": list(self._loudness_history),
                 "centroidHist": list(self._centroid_history),
                 "onsetHist": list(self._onset_history),
+                "frameId": self.frame_id,
             }

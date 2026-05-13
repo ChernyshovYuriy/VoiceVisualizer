@@ -1,14 +1,27 @@
 """
-renderer.py — 3D torus ring visualizer using QOpenGLWidget.
-Orbit with left-drag, zoom with scroll.
+renderer.py — Smoke & Filament voice visualizer (PySide6 + OpenGL 3.3 core).
 
-Place in ui/renderer.py. Integration in main_window.py:
+Designed for sustained legato vocal styles (chanson / contralto / mezzo —
+tuned around Patricia Kaas). Two main visual elements:
+
+  FILAMENT: a scrolling pitch contour over the last ~6 seconds. Vibrato
+            is visible as natural undulation in the line. Colour along
+            the trail encodes register (chest warm ↔ head cool) at the
+            moment each sample was captured. Thickness ← loudness.
+
+  PLUME:    a volumetric smoke billow anchored at the current note.
+            Warmth ← inverse of spectral centroid, size ← loudness,
+            drift ← inverse of stability, inner pulse ← onset transients.
+
+Public API (kept compatible with main_window.py):
     from ui.renderer import RingWidget
     self._ring_widget = RingWidget(self._live, parent=root)
-    vbox.addWidget(self._ring_widget, stretch=1)
+
+Mouse: left-drag orbit, wheel zoom.
 """
 from __future__ import annotations
 import math, ctypes, time as _t
+from collections import deque
 from typing import TYPE_CHECKING
 import numpy as np
 from PySide6.QtCore import Qt, QTimer, QPoint
@@ -19,204 +32,515 @@ import OpenGL.GL as GL
 if TYPE_CHECKING:
     from core.live_state import LiveState
 
-# ── shaders ───────────────────────────────────────────────────────────────────
 
-_VERT = """\
-#version 330 core
-layout(location=0) in vec3 aPos;
-layout(location=1) in vec3 aNorm;
-uniform mat4 uMVP;
-uniform mat3 uNormalMat;
-out vec3 vWorldNorm;
-out vec3 vWorldPos;
-void main() {
-    vWorldNorm = uNormalMat * aNorm;
-    vWorldPos  = aPos;
-    gl_Position = uMVP * vec4(aPos, 1.0);
-}
-"""
+# ── tuning ──────────────────────────────────────────────────────────────────
 
-_FRAG = """\
-#version 330 core
-in vec3 vWorldNorm;
-in vec3 vWorldPos;
-out vec4 fragColor;
-uniform vec3  uColor;
-uniform float uOpacity;
-uniform float uFlash;
-uniform vec3  uEye;
-void main() {
-    vec3 n = normalize(vWorldNorm);
-    vec3 v = normalize(uEye - vWorldPos);
-    float ndotv = abs(dot(n, v));
-    // Bright at silhouette (ndotv~0), dim face-on
-    float rim   = 1.0 - ndotv;
-    float inner = smoothstep(0.65, 0.35, ndotv);
-    float body  = exp(-pow(rim * 3.0, 2.0));
-    float halo  = exp(-pow(rim * 1.2, 2.0));
-    float alpha = (inner * 0.55 + body * 0.35 + halo * 0.15) * uOpacity;
-    if (alpha < 0.003) discard;
-    vec3 col = mix(uColor, vec3(1.0, 0.95, 0.85), uFlash * 0.30);
-    col += inner * vec3(0.08, 0.04, 0.01);
-    fragColor = vec4(col, alpha);
-}
-"""
+TRAIL_SECONDS    = 6.0
+TRAIL_MAX_POINTS = 360            # ring buffer cap
+
+X_LEFT, X_RIGHT  = -7.0,  6.0     # filament spans this X range
+Y_MIN,  Y_MAX    = -3.6,  3.6     # pitch field
+
+FILAMENT_BASE_W  = 0.020
+FILAMENT_MAX_W   = 0.070
+
+PLUME_BASE_R     = 0.55
+PLUME_MAX_R      = 1.85
+
+# Chanson palette — chest (warm/dark) to head (cool/bright)
+PALETTE = [
+    (0.00, (0.46, 0.11, 0.13)),   # deep wine
+    (0.22, (0.62, 0.22, 0.14)),   # burnt orange
+    (0.45, (0.78, 0.46, 0.20)),   # amber
+    (0.65, (0.85, 0.66, 0.34)),   # warm gold
+    (0.82, (0.50, 0.56, 0.50)),   # muted jade
+    (1.00, (0.42, 0.54, 0.66)),   # desaturated pewter
+]
+
+CHEST_TINT = (0.78, 0.38, 0.16)   # pull-target when centroid is low
+
+
+# ── shaders ─────────────────────────────────────────────────────────────────
 
 _BG_VERT = """\
 #version 330 core
 layout(location=0) in vec2 aPos;
-out float vY;
-void main() { vY = aPos.y * 0.5 + 0.5; gl_Position = vec4(aPos, 0.9999, 1.0); }
+out vec2 vUv;
+void main() {
+    vUv = aPos * 0.5 + 0.5;
+    gl_Position = vec4(aPos, 0.9999, 1.0);
+}
 """
 
 _BG_FRAG = """\
 #version 330 core
-in float vY; out vec4 fragColor;
+in  vec2 vUv;
+out vec4 fragColor;
+uniform float uAspect;       // width / height
 void main() {
-    fragColor = vec4(mix(vec3(0.004,0.012,0.024), vec3(0.018,0.036,0.070),
-                         smoothstep(0.0, 1.0, vY)), 1.0);
+    // Vertical sky gradient — midnight, slightly lifted in the middle
+    vec3 dark = vec3(0.008, 0.014, 0.024);
+    vec3 mid  = vec3(0.020, 0.030, 0.052);
+    vec3 sky  = mix(dark, mid, smoothstep(0.0, 0.7, vUv.y));
+
+    // Stage glow from below-centre (warm ember)
+    vec2 p = vec2((vUv.x - 0.5) * uAspect, vUv.y - (-0.15));
+    float d = length(p) * 1.4;
+    float glow = exp(-d * 2.0) * 0.65;
+    glow *= smoothstep(0.55, 0.0, vUv.y);   // bottom-half only
+
+    vec3 stage = vec3(0.42, 0.18, 0.10) * glow;
+
+    fragColor = vec4(sky + stage, 1.0);
 }
 """
 
-# ── verified matrix math ──────────────────────────────────────────────────────
-# Convention: standard row-major numpy matrices P@V@M, uploaded with transpose=True
-# so OpenGL receives them in column-major order as expected.
+# Filament: triangle strip in (x,y,z) world space + per-vertex colour + alpha.
+_FIL_VERT = """\
+#version 330 core
+layout(location=0) in vec3 aPos;
+layout(location=1) in vec3 aCol;
+layout(location=2) in float aAlpha;
+uniform mat4 uMVP;
+out vec3 vCol;
+out float vAlpha;
+void main() {
+    vCol   = aCol;
+    vAlpha = aAlpha;
+    gl_Position = uMVP * vec4(aPos, 1.0);
+}
+"""
+
+_FIL_FRAG = """\
+#version 330 core
+in vec3 vCol;
+in float vAlpha;
+out vec4 fragColor;
+void main() {
+    if (vAlpha < 0.002) discard;
+    fragColor = vec4(vCol, vAlpha);
+}
+"""
+
+# Plume: full-quad shader with multi-octave value noise + radial falloff.
+_PLUME_VERT = """\
+#version 330 core
+layout(location=0) in vec2 aPos;
+out vec2 vUv;
+uniform mat4 uMVP;
+uniform vec3 uCenter;
+uniform float uScale;
+void main() {
+    vUv = aPos;                          // -1..1
+    vec3 wp = uCenter + vec3(aPos.x * uScale, aPos.y * uScale, 0.0);
+    gl_Position = uMVP * vec4(wp, 1.0);
+}
+"""
+
+_PLUME_FRAG = """\
+#version 330 core
+in  vec2 vUv;
+out vec4 fragColor;
+
+uniform vec3  uColor;
+uniform vec3  uInner;
+uniform float uTime;
+uniform float uDrift;     // 0 still ↔ 1 turbulent
+uniform float uFlash;     // onset core flash 0..1
+uniform float uWarm;      // 0 cool head ↔ 1 warm chest
+uniform float uOpacity;
+uniform float uShapeR;    // outer falloff radius (in uv units, ~1.0)
+
+float hash(vec2 p) {
+    p = fract(p * vec2(123.34, 456.21));
+    p += dot(p, p + 45.32);
+    return fract(p.x * p.y);
+}
+float noise(vec2 p) {
+    vec2 i = floor(p), f = fract(p);
+    float a = hash(i);
+    float b = hash(i + vec2(1.0, 0.0));
+    float c = hash(i + vec2(0.0, 1.0));
+    float d = hash(i + vec2(1.0, 1.0));
+    vec2 u = f * f * (3.0 - 2.0 * f);
+    return mix(a, b, u.x) + (c - a) * u.y * (1.0 - u.x) + (d - b) * u.x * u.y;
+}
+float fbm(vec2 p) {
+    float v = 0.0, a = 0.5;
+    for (int i = 0; i < 4; i++) {
+        v += a * noise(p);
+        p *= 2.07;
+        a *= 0.5;
+    }
+    return v;
+}
+
+void main() {
+    vec2 uv = vUv;
+
+    // Slow upward breath drift; turbulence scales with uDrift
+    vec2 nuv = uv * 1.4;
+    nuv.y += uTime * 0.10;
+    nuv += vec2(uTime * 0.03, uTime * 0.05) * uDrift;
+
+    float n = fbm(nuv);
+    n = mix(0.5, n, 0.6 + uDrift * 0.4);
+
+    // Radial falloff
+    float r = length(uv) / max(0.5, uShapeR);
+    float radial = exp(-r * r * 1.6);
+    float dens   = radial * mix(0.55, 1.0, n);
+
+    // Inner bright core
+    float core = exp(-r * r * 8.0);
+    float innerPulse = core * (0.55 + uFlash * 0.45);
+
+    // Cool tint when head voice (uWarm low)
+    vec3 cool  = vec3(0.32, 0.42, 0.55);
+    vec3 outer = mix(cool * 0.7, uColor, uWarm);
+
+    vec3 col = mix(outer, uInner, innerPulse);
+    float a  = dens * uOpacity * 0.55 + innerPulse * uOpacity * 0.35;
+
+    if (a < 0.002) discard;
+    fragColor = vec4(col, a);
+}
+"""
+
+
+# ── helpers ─────────────────────────────────────────────────────────────────
+
+_LLO = math.log(65.4)
+_LR  = math.log(2093.0) - _LLO
+
+def _hz_norm(hz: float) -> float:
+    if hz <= 40.0:
+        return 0.5
+    return max(0.0, min(1.0, (math.log(max(65.4, hz)) - _LLO) / _LR))
+
+def _pitch_to_y(hz: float) -> float:
+    return Y_MIN + (Y_MAX - Y_MIN) * _hz_norm(hz)
+
+def _lp(a, b, t):     return a + (b - a) * t
+def _lp3(a, b, t):    return (a[0] + (b[0] - a[0]) * t,
+                              a[1] + (b[1] - a[1]) * t,
+                              a[2] + (b[2] - a[2]) * t)
+def _clamp(v, lo, hi): return max(lo, min(hi, v))
+
+def _palette(t: float):
+    t = _clamp(t, 0.0, 1.0)
+    for i in range(len(PALETTE) - 1):
+        t0, c0 = PALETTE[i]; t1, c1 = PALETTE[i + 1]
+        if t0 <= t <= t1:
+            f = (t - t0) / (t1 - t0)
+            return (c0[0] + f * (c1[0] - c0[0]),
+                    c0[1] + f * (c1[1] - c0[1]),
+                    c0[2] + f * (c1[2] - c0[2]))
+    return PALETTE[-1][1]
+
+
+# ── matrix math ─────────────────────────────────────────────────────────────
+# Convention: row-major numpy, P @ V @ M, uploaded with transpose=True.
 
 def _perspective(fov_deg, aspect, near, far):
     t = math.tan(math.radians(fov_deg) / 2)
     return np.array([
-        [1/(aspect*t), 0,    0,                    0],
-        [0,            1/t,  0,                    0],
-        [0,            0,   -(far+near)/(far-near), -2*far*near/(far-near)],
-        [0,            0,   -1,                    0],
+        [1/(aspect*t), 0,    0,                      0],
+        [0,            1/t,  0,                      0],
+        [0,            0,   -(far+near)/(far-near),  -2*far*near/(far-near)],
+        [0,            0,   -1,                      0],
     ], dtype=np.float32)
 
 def _look_at(eye, ctr, up):
-    eye=np.array(eye,np.float32); ctr=np.array(ctr,np.float32); up=np.array(up,np.float32)
-    f=ctr-eye; f/=np.linalg.norm(f)
-    r=np.cross(f,up); r/=np.linalg.norm(r)
-    u=np.cross(r,f)
-    R = np.array([[r[0],r[1],r[2],0],[u[0],u[1],u[2],0],[-f[0],-f[1],-f[2],0],[0,0,0,1]],np.float32)
-    T = np.array([[1,0,0,-eye[0]],[0,1,0,-eye[1]],[0,0,1,-eye[2]],[0,0,0,1]],np.float32)
+    eye = np.array(eye, np.float32)
+    ctr = np.array(ctr, np.float32)
+    up  = np.array(up,  np.float32)
+    f = ctr - eye;  f /= np.linalg.norm(f)
+    r = np.cross(f, up); r /= np.linalg.norm(r)
+    u = np.cross(r, f)
+    R = np.array([[r[0], r[1], r[2], 0],
+                  [u[0], u[1], u[2], 0],
+                  [-f[0], -f[1], -f[2], 0],
+                  [0, 0, 0, 1]], np.float32)
+    T = np.array([[1, 0, 0, -eye[0]],
+                  [0, 1, 0, -eye[1]],
+                  [0, 0, 1, -eye[2]],
+                  [0, 0, 0, 1]], np.float32)
     return R @ T
 
-def _translate(x,y,z):
-    m=np.eye(4,dtype=np.float32); m[0,3]=x; m[1,3]=y; m[2,3]=z; return m
 
-def _scale(s):
-    m=np.eye(4,dtype=np.float32); m[0,0]=m[1,1]=m[2,2]=s; return m
-
-# ── torus geometry ────────────────────────────────────────────────────────────
-
-def _torus(R=1.0, r=0.22, seg=120, tseg=40):
-    """Torus in XZ plane. Returns float32 (N,6): xyz + normal xyz."""
-    rows = []
-    for i in range(seg):
-        for j in range(tseg):
-            for di, dj in ((0,0),(1,0),(1,1),(0,0),(1,1),(0,1)):
-                a = 2*math.pi*(i+di)/seg
-                b = 2*math.pi*(j+dj)/tseg
-                ca,sa = math.cos(a),math.sin(a)
-                cb,sb = math.cos(b),math.sin(b)
-                x = (R + r*cb)*ca
-                y = r*sb
-                z = (R + r*cb)*sa
-                nx,ny,nz = cb*ca, sb, cb*sa
-                rows.append((x,y,z,nx,ny,nz))
-    return np.array(rows, dtype=np.float32)
-
-# ── palette ───────────────────────────────────────────────────────────────────
-
-_PAL=[(0.00,(0.43,0.15,0.12)),(0.25,(0.61,0.28,0.14)),(0.48,(0.72,0.46,0.18)),
-      (0.65,(0.62,0.58,0.28)),(0.80,(0.30,0.55,0.47)),(1.00,(0.21,0.56,0.64))]
-
-def _pal(t):
-    t=max(0.,min(1.,t))
-    for i in range(len(_PAL)-1):
-        t0,c0=_PAL[i]; t1,c1=_PAL[i+1]
-        if t0<=t<=t1:
-            f=(t-t0)/(t1-t0); return tuple(c0[k]+f*(c1[k]-c0[k]) for k in range(3))
-    return _PAL[-1][1]
-
-# ── smoother ──────────────────────────────────────────────────────────────────
-
-_LLO=math.log(65.4); _LR=math.log(2093.)-_LLO
-def _hn(hz): return max(0.,min(1.,(math.log(max(65.4,hz))-_LLO)/_LR))
-def _lp(a,b,t): return a+(b-a)*t
-def _lp3(a,b,t): return tuple(a[k]+(b[k]-a[k])*t for k in range(3))
-
-class _Sm:
-    G=0.35
-    def __init__(self): self.pn=0.5;self.ln=0.;self.en=0.;self.c=0.;self.ho=0.;self.tr=0.;self._n=""
-    def tick(self,s,dt):
-        p=float(s.get("pitch",0));lo=float(s.get("loudness",-80))
-        e=float(s.get("energy",0));rc=float(s.get("pitchConf",0))
-        on=float(s.get("onset",0));oh=s.get("onsetHist",[]);n=s.get("note","—")
-        ok=p>40 and rc>=self.G; c=rc if ok else 0.
-        if ok: self.pn=_lp(self.pn,_hn(p),0.12)
-        self.c=_lp(self.c,c,.18); self.ln=_lp(self.ln,max(0.,min(1.,(lo+58)/38)),.22)
-        self.en=_lp(self.en,max(0.,min(1.,e)),.28)
-        ho=(sum(oh)/len(oh)) if oh else on; self.ho=_lp(self.ho,max(0.,min(1.,ho)),.3)
-        if on>0.28: self.tr=max(self.tr,on*.7)
-        if n!="—" and n!=self._n: self.tr=max(self.tr,.8); self._n=n
-        self.tr=max(0.,self.tr-dt*18.)
-    def out(self):
-        c=self.c; lm=max(0.,min(1.,.65*self.ln+.35*self.en)); tr=max(0.,min(1.,self.tr*.8+self.ho*.2))
-        return dict(active=c>.08, pn=self.pn, r=.52+lm*.48+tr*.08,
-                    fy=_lp(.05,.10,c*c), fr=.14 if lm>0 else .06,
-                    tr=tr, org=max(0.,min(1.,self.en*.6+tr*.4)))
-
-# ── GL ────────────────────────────────────────────────────────────────────────
+# ── GL helpers ──────────────────────────────────────────────────────────────
 
 def _shader(src, kind):
-    s=GL.glCreateShader(kind); GL.glShaderSource(s,src); GL.glCompileShader(s)
-    if not GL.glGetShaderiv(s,GL.GL_COMPILE_STATUS):
+    s = GL.glCreateShader(kind)
+    GL.glShaderSource(s, src)
+    GL.glCompileShader(s)
+    if not GL.glGetShaderiv(s, GL.GL_COMPILE_STATUS):
         raise RuntimeError(GL.glGetShaderInfoLog(s).decode())
     return s
 
-def _program(vs,fs):
-    p=GL.glCreateProgram()
-    v=_shader(vs,GL.GL_VERTEX_SHADER); f=_shader(fs,GL.GL_FRAGMENT_SHADER)
-    GL.glAttachShader(p,v); GL.glAttachShader(p,f); GL.glLinkProgram(p)
-    if not GL.glGetProgramiv(p,GL.GL_LINK_STATUS):
+def _program(vs, fs):
+    p = GL.glCreateProgram()
+    v = _shader(vs, GL.GL_VERTEX_SHADER)
+    f = _shader(fs, GL.GL_FRAGMENT_SHADER)
+    GL.glAttachShader(p, v); GL.glAttachShader(p, f)
+    GL.glLinkProgram(p)
+    if not GL.glGetProgramiv(p, GL.GL_LINK_STATUS):
         raise RuntimeError(GL.glGetProgramInfoLog(p).decode())
-    GL.glDeleteShader(v); GL.glDeleteShader(f); return p
+    GL.glDeleteShader(v); GL.glDeleteShader(f)
+    return p
 
-def _vao_mesh(arr):
-    vao=GL.glGenVertexArrays(1); vbo=GL.glGenBuffers(1)
+def _ul(p, name): return GL.glGetUniformLocation(p, name)
+
+def _make_quad_vao():
+    """Fullscreen NDC quad with vec2 positions."""
+    q = np.array([-1, -1,  1, -1,  1,  1,
+                  -1, -1,  1,  1, -1,  1], dtype=np.float32)
+    vao = GL.glGenVertexArrays(1); vbo = GL.glGenBuffers(1)
     GL.glBindVertexArray(vao)
-    GL.glBindBuffer(GL.GL_ARRAY_BUFFER,vbo)
-    GL.glBufferData(GL.GL_ARRAY_BUFFER,arr.nbytes,arr,GL.GL_STATIC_DRAW)
+    GL.glBindBuffer(GL.GL_ARRAY_BUFFER, vbo)
+    GL.glBufferData(GL.GL_ARRAY_BUFFER, q.nbytes, q, GL.GL_STATIC_DRAW)
     GL.glEnableVertexAttribArray(0)
-    GL.glVertexAttribPointer(0,3,GL.GL_FLOAT,False,24,ctypes.c_void_p(0))
-    GL.glEnableVertexAttribArray(1)
-    GL.glVertexAttribPointer(1,3,GL.GL_FLOAT,False,24,ctypes.c_void_p(12))
-    GL.glBindVertexArray(0); return vao, len(arr)
+    GL.glVertexAttribPointer(0, 2, GL.GL_FLOAT, False, 0, None)
+    GL.glBindVertexArray(0)
+    return vao
 
-def _vao_quad():
-    q=np.array([-1,-1,1,-1,1,1,-1,-1,1,1,-1,1],dtype=np.float32)
-    vao=GL.glGenVertexArrays(1); vbo=GL.glGenBuffers(1)
-    GL.glBindVertexArray(vao)
-    GL.glBindBuffer(GL.GL_ARRAY_BUFFER,vbo)
-    GL.glBufferData(GL.GL_ARRAY_BUFFER,q.nbytes,q,GL.GL_STATIC_DRAW)
-    GL.glEnableVertexAttribArray(0)
-    GL.glVertexAttribPointer(0,2,GL.GL_FLOAT,False,0,None)
-    GL.glBindVertexArray(0); return vao
 
-def _ul(p,n): return GL.glGetUniformLocation(p,n)
+# ── filament ────────────────────────────────────────────────────────────────
 
-# ── ring layout ───────────────────────────────────────────────────────────────
+class _Filament:
+    """
+    Ring buffer of pitch samples + GPU triangle strip rebuilt each paint.
+    Each sample contributes 2 vertices (top + bottom of a 2D ribbon in XY).
+    Per-vertex attributes: position(3), color(3), alpha(1).
+    """
+    STRIDE = (3 + 3 + 1) * 4   # bytes per vertex
 
-_RINGS = [
-    (0.00, 1.00, 0.90, False),
-    (0.00, 0.80, 0.40, True),
-    (0.00, 1.20, 0.30, True),
-    (0.00, 0.62, 0.20, True),
-]
+    def __init__(self, capacity: int):
+        self._cap = capacity
+        # Each sample: (t, y, thickness, r, g, b, voiced)
+        self._buf: deque = deque(maxlen=capacity)
+        self._last_frame_id = -1
 
-# ── widget ────────────────────────────────────────────────────────────────────
+        # Pre-allocate CPU buffers for max vertex count
+        nverts = capacity * 2
+        self._pos   = np.zeros(nverts * 3, dtype=np.float32)
+        self._col   = np.zeros(nverts * 3, dtype=np.float32)
+        self._alpha = np.zeros(nverts,     dtype=np.float32)
+
+        # Index buffer — strip-like triangulation
+        nsegs = capacity - 1
+        idx = np.empty(nsegs * 6, dtype=np.uint32)
+        for i in range(nsegs):
+            a = i * 2
+            o = i * 6
+            idx[o:o+6] = (a, a+1, a+2, a+1, a+3, a+2)
+        self._idx_cpu = idx
+
+        # GL handles — created in init_gl()
+        self.vao = self.vbo_pos = self.vbo_col = self.vbo_a = self.ebo = 0
+
+    # ---- GL lifecycle ------------------------------------------------------
+
+    def init_gl(self):
+        self.vao = GL.glGenVertexArrays(1)
+        GL.glBindVertexArray(self.vao)
+
+        self.vbo_pos = GL.glGenBuffers(1)
+        GL.glBindBuffer(GL.GL_ARRAY_BUFFER, self.vbo_pos)
+        GL.glBufferData(GL.GL_ARRAY_BUFFER, self._pos.nbytes, None, GL.GL_DYNAMIC_DRAW)
+        GL.glEnableVertexAttribArray(0)
+        GL.glVertexAttribPointer(0, 3, GL.GL_FLOAT, False, 0, None)
+
+        self.vbo_col = GL.glGenBuffers(1)
+        GL.glBindBuffer(GL.GL_ARRAY_BUFFER, self.vbo_col)
+        GL.glBufferData(GL.GL_ARRAY_BUFFER, self._col.nbytes, None, GL.GL_DYNAMIC_DRAW)
+        GL.glEnableVertexAttribArray(1)
+        GL.glVertexAttribPointer(1, 3, GL.GL_FLOAT, False, 0, None)
+
+        self.vbo_a = GL.glGenBuffers(1)
+        GL.glBindBuffer(GL.GL_ARRAY_BUFFER, self.vbo_a)
+        GL.glBufferData(GL.GL_ARRAY_BUFFER, self._alpha.nbytes, None, GL.GL_DYNAMIC_DRAW)
+        GL.glEnableVertexAttribArray(2)
+        GL.glVertexAttribPointer(2, 1, GL.GL_FLOAT, False, 0, None)
+
+        self.ebo = GL.glGenBuffers(1)
+        GL.glBindBuffer(GL.GL_ELEMENT_ARRAY_BUFFER, self.ebo)
+        GL.glBufferData(GL.GL_ELEMENT_ARRAY_BUFFER, self._idx_cpu.nbytes,
+                        self._idx_cpu, GL.GL_STATIC_DRAW)
+
+        GL.glBindVertexArray(0)
+
+    # ---- sample ingestion --------------------------------------------------
+
+    def ingest(self, snap: dict, t_now: float) -> None:
+        """Append a sample only if a new analysis frame has arrived."""
+        fid = int(snap.get("frameId", 0))
+        if fid == self._last_frame_id:
+            return
+        self._last_frame_id = fid
+
+        pitch = float(snap.get("pitch", 0.0))
+        conf  = float(snap.get("pitchConf", 0.0))
+        voiced = (pitch > 40.0) and (conf > 0.10)
+
+        loud  = float(snap.get("loudness", -80.0))
+        cent  = float(snap.get("centroid", 900.0))
+        loud_n = _clamp((loud + 58.0) / 38.0, 0.0, 1.0)
+        cent_n = _clamp((cent - 250.0) / 3600.0, 0.0, 1.0)
+
+        # Sample colour: pitch palette pulled toward chest tint when dark
+        pn   = _hz_norm(pitch if voiced else 220.0)
+        pcol = _palette(pn)
+        chest_pull = (1.0 - cent_n) * 0.55
+        col = _lp3(pcol, CHEST_TINT, chest_pull * 0.55)
+
+        # Thickness from loudness
+        thick = FILAMENT_BASE_W + (FILAMENT_MAX_W - FILAMENT_BASE_W) * loud_n
+
+        y = _pitch_to_y(pitch if voiced else 220.0)
+        self._buf.append((t_now, y, thick, col[0], col[1], col[2], 1.0 if voiced else 0.0))
+
+    # ---- per-frame geometry rebuild ---------------------------------------
+
+    def build_and_upload(self, t_now: float) -> int:
+        """Returns number of indices to draw (0 if nothing)."""
+        buf = self._buf
+        n = len(buf)
+        if n < 2:
+            return 0
+
+        # Window to samples within trailSeconds
+        t_oldest_allowed = t_now - TRAIL_SECONDS
+        # Find first sample within window (deque indexing is O(n) but n<=cap)
+        items = list(buf)
+        start = 0
+        for i, s in enumerate(items):
+            if s[0] >= t_oldest_allowed:
+                start = i; break
+        else:
+            start = len(items) - 1
+        used = n - start
+        if used < 2:
+            return 0
+
+        t_new = items[-1][0]
+        t_old = items[start][0]
+        t_span = max(0.05, t_new - t_old)
+
+        pos = self._pos; col = self._col; a = self._alpha
+
+        for i in range(used):
+            t, y, thick, r, g, b, voiced = items[start + i]
+            tfrac = (t - t_old) / t_span         # 0 oldest .. 1 newest
+            x = X_LEFT + (X_RIGHT - X_LEFT) * tfrac
+
+            # Age weighting: thicker/brighter near "now"
+            age_fade  = pow(tfrac, 0.55)
+            head_fade = 1.0 - pow(1.0 - tfrac, 6.0)
+            # Voiced gating — unvoiced regions collapse to near-zero width
+            vw = 1.0 if voiced > 0.5 else 0.12
+            half = 0.5 * thick * vw * age_fade * (0.4 + 0.6 * head_fade)
+
+            top_y = y + half
+            bot_y = y - half
+
+            o = i * 2
+            # vertices: top, bottom
+            pos[o*3+0] = x;  pos[o*3+1] = top_y; pos[o*3+2] = 0.0
+            pos[(o+1)*3+0] = x;  pos[(o+1)*3+1] = bot_y; pos[(o+1)*3+2] = 0.0
+
+            # Brighten the leading 8% of the trail
+            head_boost = 1.0 + pow(_clamp((tfrac - 0.92) / 0.08, 0.0, 1.0), 1.2) * 0.55
+            cr = min(r * head_boost, 1.4)
+            cg = min(g * head_boost, 1.4)
+            cb = min(b * head_boost, 1.4)
+            col[o*3+0]   = cr; col[o*3+1]   = cg; col[o*3+2]   = cb
+            col[(o+1)*3+0] = cr; col[(o+1)*3+1] = cg; col[(o+1)*3+2] = cb
+
+            av = (0.95 if voiced > 0.5 else 0.10) * age_fade
+            a[o]   = av
+            a[o+1] = av
+
+        # Upload sub-ranges
+        nverts = used * 2
+        GL.glBindBuffer(GL.GL_ARRAY_BUFFER, self.vbo_pos)
+        GL.glBufferSubData(GL.GL_ARRAY_BUFFER, 0, nverts * 3 * 4, pos[:nverts * 3])
+        GL.glBindBuffer(GL.GL_ARRAY_BUFFER, self.vbo_col)
+        GL.glBufferSubData(GL.GL_ARRAY_BUFFER, 0, nverts * 3 * 4, col[:nverts * 3])
+        GL.glBindBuffer(GL.GL_ARRAY_BUFFER, self.vbo_a)
+        GL.glBufferSubData(GL.GL_ARRAY_BUFFER, 0, nverts * 4, a[:nverts])
+
+        return (used - 1) * 6
+
+
+# ── feature smoother for the plume ──────────────────────────────────────────
+
+class _Smoother:
+    """Smoothed display state for the plume (current note)."""
+    G = 0.20   # min confidence to be 'voiced'
+
+    def __init__(self):
+        self.pn = 0.5
+        self.ln = 0.0
+        self.en = 0.0
+        self.c  = 0.0      # smoothed pitch confidence (stability)
+        self.cn = 0.25     # centroid norm
+        self.tr = 0.0      # transient flash
+        self.dy = 0.0      # display Y
+        self._n = ""
+
+    def tick(self, s: dict, dt: float) -> None:
+        p   = float(s.get("pitch", 0.0))
+        lo  = float(s.get("loudness", -80.0))
+        e   = float(s.get("energy", 0.0))
+        rc  = float(s.get("pitchConf", 0.0))
+        cent = float(s.get("centroid", 900.0))
+        on  = float(s.get("onset", 0.0))
+        oh  = s.get("onsetHist", [])
+        n   = s.get("note", "—")
+
+        ok = p > 40 and rc >= self.G
+        c  = rc if ok else 0.0
+
+        if ok:
+            self.pn = _lp(self.pn, _hz_norm(p), 0.20)
+        self.c  = _lp(self.c,  c,  0.18)
+        self.ln = _lp(self.ln, _clamp((lo + 58.0) / 38.0, 0.0, 1.0), 0.22)
+        self.en = _lp(self.en, _clamp(e, 0.0, 1.0), 0.28)
+        self.cn = _lp(self.cn, _clamp((cent - 250.0) / 3600.0, 0.0, 1.0), 0.18)
+
+        ho = (sum(oh) / len(oh)) if oh else on
+        if on > 0.28:
+            self.tr = max(self.tr, on * 0.7)
+        if n != "—" and n != self._n:
+            self.tr = max(self.tr, 0.8); self._n = n
+        self.tr = max(0.0, self.tr - dt * 14.0)
+
+        # Y eases up fast on attack, releases slowly (chanson sustain)
+        ty = _lp(Y_MIN, Y_MAX, self.pn) if ok else 0.0
+        y_alpha = 0.45 if ty > self.dy else 0.08
+        self.dy = _lp(self.dy, ty, y_alpha)
+
+    def state(self) -> dict:
+        return {
+            "active": self.c > 0.08,
+            "y":      self.dy,
+            "pn":     self.pn,
+            "loud":   self.ln,
+            "stab":   self.c,
+            "warm":   1.0 - self.cn,     # 0 cool ↔ 1 warm
+            "flash":  _clamp(self.tr, 0.0, 1.0),
+        }
+
+
+# ── widget ──────────────────────────────────────────────────────────────────
 
 class RingWidget(QOpenGLWidget):
+    """
+    Public name retained for main_window.py compatibility. The visual is
+    now Smoke & Filament, not rings.
+    """
 
     def __init__(self, live_state: "LiveState", parent=None):
         fmt = QSurfaceFormat()
@@ -228,95 +552,185 @@ class RingWidget(QOpenGLWidget):
         super().__init__(parent)
 
         self._live = live_state
-        self._sm   = _Sm()
-        self._dy   = 0.0
-        self._dr   = 0.65
-        self._col  = (0.72, 0.45, 0.22)
-        self._lt   = None
+        self._sm   = _Smoother()
+        self._fil  = _Filament(TRAIL_MAX_POINTS)
 
-        # Camera orbit: yaw around Y, pitch above horizon
-        self._yaw   = 25.0
-        self._pitch = 30.0
-        self._dist  =  7.0
+        # Smoothed plume display state
+        self._plume_y     = 0.0
+        self._plume_size  = 0.6
+        self._plume_drift = 0.5
+        self._plume_warm  = 0.7
+        self._plume_flash = 0.0
+        self._plume_color = (0.78, 0.46, 0.20)
+        self._plume_inner = (0.95, 0.78, 0.55)
+
+        # Camera orbit — start gently angled
+        self._yaw   = 0.0
+        self._pitch = 6.0
+        self._dist  = 11.0
         self._mp: QPoint | None = None
+
+        # Wall-clock timeline for the filament
+        self._t0   = _t.perf_counter()
+        self._lt   = None
 
         QTimer(self, interval=16, timeout=self.update).start()
 
-    def mousePressEvent(self, e: QMouseEvent):
-        if e.button() == Qt.LeftButton: self._mp = e.position().toPoint()
+    # ---- input -------------------------------------------------------------
 
-    def mouseReleaseEvent(self, e: QMouseEvent): self._mp = None
+    def mousePressEvent(self, e: QMouseEvent):
+        if e.button() == Qt.LeftButton:
+            self._mp = e.position().toPoint()
+
+    def mouseReleaseEvent(self, e: QMouseEvent):
+        self._mp = None
 
     def mouseMoveEvent(self, e: QMouseEvent):
         if self._mp is None: return
-        self._yaw  += (e.position().x() - self._mp.x()) * 0.4
-        self._pitch = max(-89., min(89., self._pitch + (e.position().y() - self._mp.y()) * 0.4))
+        self._yaw   += (e.position().x() - self._mp.x()) * 0.35
+        self._pitch  = _clamp(self._pitch + (e.position().y() - self._mp.y()) * 0.35, -60.0, 60.0)
         self._mp = e.position().toPoint()
 
     def wheelEvent(self, e: QWheelEvent):
-        self._dist = max(3., min(20., self._dist - e.angleDelta().y()/120. * 0.5))
+        self._dist = _clamp(self._dist - e.angleDelta().y() / 120.0 * 0.6, 5.0, 22.0)
+
+    # ---- GL ---------------------------------------------------------------
 
     def initializeGL(self):
         try:
-            self._rp  = _program(_VERT,    _FRAG)
-            self._bgp = _program(_BG_VERT,  _BG_FRAG)
-            self._rvao, self._rn = _vao_mesh(_torus())
-            self._bgvao = _vao_quad()
-            GL.glEnable(GL.GL_DEPTH_TEST)
+            self._bg_prog    = _program(_BG_VERT,    _BG_FRAG)
+            self._fil_prog   = _program(_FIL_VERT,   _FIL_FRAG)
+            self._plume_prog = _program(_PLUME_VERT, _PLUME_FRAG)
+
+            self._quad_vao = _make_quad_vao()
+            self._fil.init_gl()
+
             GL.glEnable(GL.GL_BLEND)
-            try: GL.glEnable(GL.GL_MULTISAMPLE)
-            except Exception: pass
-            print("[renderer] OK —", GL.glGetString(GL.GL_RENDERER).decode())
+            try:
+                GL.glEnable(GL.GL_MULTISAMPLE)
+            except Exception:
+                pass
+            print("[renderer] Smoke & Filament OK —",
+                  GL.glGetString(GL.GL_RENDERER).decode())
         except Exception as exc:
             print(f"[renderer] FAILED: {exc}")
-            self._rp = 0
+            self._bg_prog = 0
 
-    def resizeGL(self, w, h): GL.glViewport(0, 0, w, h)
+    def resizeGL(self, w, h):
+        GL.glViewport(0, 0, w, h)
 
     def paintGL(self):
-        if not getattr(self,'_rp',0): return
+        if not getattr(self, "_bg_prog", 0):
+            return
 
-        now=_t.perf_counter(); dt=min((now-self._lt) if self._lt else .016,.05); self._lt=now
+        # Time bookkeeping
+        now = _t.perf_counter()
+        dt = min((now - self._lt) if self._lt else 0.016, 0.05)
+        self._lt = now
+        t_world = now - self._t0
 
-        snap=self._live.snapshot(); self._sm.tick(snap,dt); lv=self._sm.out()
+        snap = self._live.snapshot()
+        self._sm.tick(snap, dt)
+        self._fil.ingest(snap, t_world)
+        lv = self._sm.state()
 
-        tY=_lp(-3.,3.,lv["pn"]) if lv["active"] else 0.
-        self._dy  = _lp(self._dy,  tY,      lv["fy"] if lv["active"] else .05)
-        self._dr  = _lp(self._dr,  lv["r"], lv["fr"])
-        self._col = _lp3(self._col, _pal(lv["pn"]), .12)
+        # Camera matrices
+        w = self.width(); h = max(self.height(), 1)
+        aspect = w / h
+        yaw = math.radians(self._yaw)
+        pit = math.radians(self._pitch)
+        d   = self._dist
+        eye = np.array([
+            d * math.cos(pit) * math.sin(yaw),
+            d * math.sin(pit) * 0.4,            # mostly horizontal — chanson stage feel
+            d * math.cos(pit) * math.cos(yaw),
+        ], np.float32)
+        P  = _perspective(40.0, aspect, 0.1, 100.0)
+        V  = _look_at(eye, [0.0, 0.0, 0.0], [0, 1, 0])
+        VP = (P @ V).astype(np.float32)
 
-        w=self.width(); h=max(self.height(),1)
-        yr=math.radians(self._yaw); pr=math.radians(self._pitch); d=self._dist
-        eye=np.array([d*math.cos(pr)*math.sin(yr), d*math.sin(pr), d*math.cos(pr)*math.cos(yr)],np.float32)
-
-        # Verified convention: P@V@M in numpy row-major, uploaded with transpose=True
-        P=_perspective(44.,w/h,0.1,100.)
-        V=_look_at(eye,[0,0,0],[0,1,0])
-        VP=P@V
-
-        # Background
+        # ── Background — disable depth, draw fullscreen quad
+        GL.glDisable(GL.GL_DEPTH_TEST)
         GL.glDepthMask(False)
-        GL.glBlendFunc(GL.GL_SRC_ALPHA,GL.GL_ONE_MINUS_SRC_ALPHA)
-        GL.glClearColor(.004,.012,.024,1.); GL.glClear(GL.GL_COLOR_BUFFER_BIT|GL.GL_DEPTH_BUFFER_BIT)
-        GL.glUseProgram(self._bgp); GL.glBindVertexArray(self._bgvao); GL.glDrawArrays(GL.GL_TRIANGLES,0,6)
+        GL.glBlendFunc(GL.GL_SRC_ALPHA, GL.GL_ONE_MINUS_SRC_ALPHA)
+        GL.glClearColor(0.008, 0.014, 0.024, 1.0)
+        GL.glClear(GL.GL_COLOR_BUFFER_BIT | GL.GL_DEPTH_BUFFER_BIT)
+        GL.glUseProgram(self._bg_prog)
+        GL.glUniform1f(_ul(self._bg_prog, "uAspect"), aspect)
+        GL.glBindVertexArray(self._quad_vao)
+        GL.glDrawArrays(GL.GL_TRIANGLES, 0, 6)
 
-        # Rings — additive blend
-        GL.glBlendFunc(GL.GL_SRC_ALPHA,GL.GL_ONE)
-        GL.glUseProgram(self._rp); GL.glBindVertexArray(self._rvao)
+        # ── Filament — additive blending, no depth test
+        GL.glBlendFunc(GL.GL_SRC_ALPHA, GL.GL_ONE)
+        idx_count = self._fil.build_and_upload(t_world)
+        if idx_count > 0:
+            GL.glUseProgram(self._fil_prog)
+            GL.glUniformMatrix4fv(_ul(self._fil_prog, "uMVP"), 1, True, VP.flatten())
+            GL.glBindVertexArray(self._fil.vao)
+            GL.glDrawElements(GL.GL_TRIANGLES, idx_count, GL.GL_UNSIGNED_INT, None)
 
-        for y_off, scale, op, echo in _RINGS:
-            r=self._dr*scale; yp=self._dy+y_off
-            M=_translate(0,yp,0)@_scale(r)
-            mvp=(VP@M).astype(np.float32)
-            nm=np.linalg.inv(M[:3,:3]).T.astype(np.float32)
+        # ── Plume — two billboards (halo then core)
+        # Smooth plume params
+        active = lv["active"]
+        target_size = (PLUME_BASE_R + lv["loud"] * (PLUME_MAX_R - PLUME_BASE_R)) if active else 0.45
+        target_drift = (1.0 - lv["stab"]) if active else 0.8
+        target_warm  = lv["warm"] if active else 0.5
+        target_flash = lv["flash"] if active else 0.0
 
-            GL.glUniformMatrix4fv(_ul(self._rp,"uMVP"),      1, True, mvp.flatten())
-            GL.glUniformMatrix3fv(_ul(self._rp,"uNormalMat"),1, True, nm.flatten())
-            GL.glUniform3f(_ul(self._rp,"uEye"),  *eye)
-            dim=1. if not echo else .72
-            GL.glUniform3f(_ul(self._rp,"uColor"), *(self._col[k]*dim for k in range(3)))
-            GL.glUniform1f(_ul(self._rp,"uOpacity"), op)
-            GL.glUniform1f(_ul(self._rp,"uFlash"),   lv["tr"]*(1. if not echo else .3))
-            GL.glDrawArrays(GL.GL_TRIANGLES,0,self._rn)
+        self._plume_size  = _lp(self._plume_size,  target_size,  0.18 if active else 0.06)
+        self._plume_drift = _lp(self._plume_drift, target_drift, 0.10)
+        self._plume_warm  = _lp(self._plume_warm,  target_warm,  0.12)
+        self._plume_flash = _lp(self._plume_flash, target_flash, 0.40)
 
-        GL.glDepthMask(True); GL.glBindVertexArray(0); GL.glUseProgram(0)
+        pcol = _palette(lv["pn"])
+        chest_pull = self._plume_warm * 0.5
+        target_col = _lp3(pcol, CHEST_TINT, chest_pull * 0.5)
+        self._plume_color = _lp3(self._plume_color, target_col, 0.18)
+
+        # Inner core colour: warmer-bright in chest, cooler in head
+        inner_target = (
+            _lp(0.78, 1.00, self._plume_warm),
+            _lp(0.72, 0.85, self._plume_warm),
+            _lp(0.70, 0.55, self._plume_warm),
+        )
+        self._plume_inner = _lp3(self._plume_inner, inner_target, 0.20)
+
+        plume_y = self._sm.dy
+        opacity = 0.95 if active else 0.25
+
+        GL.glUseProgram(self._plume_prog)
+        GL.glUniformMatrix4fv(_ul(self._plume_prog, "uMVP"), 1, True, VP.flatten())
+        GL.glBindVertexArray(self._quad_vao)
+
+        # Halo (larger, dimmer, behind)
+        halo_size = self._plume_size * 1.55
+        halo_col  = (self._plume_color[0] * 0.55,
+                     self._plume_color[1] * 0.42,
+                     self._plume_color[2] * 0.32)
+        GL.glUniform3f(_ul(self._plume_prog, "uCenter"), X_RIGHT, plume_y, -0.05)
+        GL.glUniform1f(_ul(self._plume_prog, "uScale"),  halo_size)
+        GL.glUniform3f(_ul(self._plume_prog, "uColor"),  *halo_col)
+        GL.glUniform3f(_ul(self._plume_prog, "uInner"),  *self._plume_inner)
+        GL.glUniform1f(_ul(self._plume_prog, "uTime"),   t_world)
+        GL.glUniform1f(_ul(self._plume_prog, "uDrift"),  self._plume_drift)
+        GL.glUniform1f(_ul(self._plume_prog, "uFlash"),  0.0)
+        GL.glUniform1f(_ul(self._plume_prog, "uWarm"),   self._plume_warm)
+        GL.glUniform1f(_ul(self._plume_prog, "uOpacity"), opacity * 0.50)
+        GL.glUniform1f(_ul(self._plume_prog, "uShapeR"), 1.0)
+        GL.glDrawArrays(GL.GL_TRIANGLES, 0, 6)
+
+        # Core
+        GL.glUniform3f(_ul(self._plume_prog, "uCenter"), X_RIGHT, plume_y, 0.01)
+        GL.glUniform1f(_ul(self._plume_prog, "uScale"),  self._plume_size)
+        GL.glUniform3f(_ul(self._plume_prog, "uColor"),  *self._plume_color)
+        GL.glUniform3f(_ul(self._plume_prog, "uInner"),  *self._plume_inner)
+        GL.glUniform1f(_ul(self._plume_prog, "uTime"),   t_world)
+        GL.glUniform1f(_ul(self._plume_prog, "uDrift"),  self._plume_drift)
+        GL.glUniform1f(_ul(self._plume_prog, "uFlash"),  self._plume_flash)
+        GL.glUniform1f(_ul(self._plume_prog, "uWarm"),   self._plume_warm)
+        GL.glUniform1f(_ul(self._plume_prog, "uOpacity"), opacity)
+        GL.glUniform1f(_ul(self._plume_prog, "uShapeR"), 1.0)
+        GL.glDrawArrays(GL.GL_TRIANGLES, 0, 6)
+
+        GL.glBindVertexArray(0)
+        GL.glUseProgram(0)

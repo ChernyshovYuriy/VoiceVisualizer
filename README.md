@@ -1,23 +1,23 @@
 # Voice / Music Visualizer — Live (3D)
 
 A native desktop app that plays any audio or video file and renders a
-**live 3D surface visualization** synchronized to the audio in real time.
+**live voice visualization** synchronized to the audio in real time.
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│  📂 Open file…   ▶ Play   song.mp3  (3:24)                      │
-│                                                                 │
-│  ┌────────────────────────────────────┐  ┌──────────────────┐   │
-│  │                                    │  │ › Analysis       │   │
-│  │   3D mel-spectrogram surface       │  │ Note   A4        │   │
-│  │   X = time  (scrolling)            │  │ Freq   440 Hz    │   │
-│  │   Y = frequency (mel, 80–4k Hz)    │  │ Volume −8.2 dB   │   │
-│  │   Z = energy                       │  │ Timbre Bright    │   │
-│  │   Color = loudness                 │  │ Range  Head      │   │
-│  └────────────────────────────────────┘  └──────────────────┘   │
-│  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  1:12 / 3:24                │
-└─────────────────────────────────────────────────────────────────┘
-```
+The visualizer (`ui/renderer.py`, PySide6 + OpenGL 3.3) uses a
+**Smoke & Filament** design tuned for sustained legato vocal styles
+(chanson, jazz vocal, contralto/mezzo — designed around Patricia Kaas):
+
+* A scrolling **pitch contour filament** showing the melodic line over
+  the last ~6 seconds. Vibrato is visible as natural undulation in the
+  line. Colour along its length encodes vocal register (chest warm ↔
+  head cool) at the moment each sample was captured.
+* A **volumetric smoke plume** anchored at the current note. Warmth
+  follows spectral centroid, size follows loudness, drift follows
+  vocal instability, and the inner core pulses on consonant onsets.
+* A midnight background with a subtle warm stage-light glow from
+  below.
+
+See `AGENTS.md` for the visual specification.
 
 ---
 

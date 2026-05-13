@@ -1,254 +1,151 @@
 # AGENTS.md
 
-## Project: Voice / Music Visualizer (3D)
+## Project: Voice / Music Visualizer
 
-This project implements a **premium real-time voice/music visualizer** using Three.js.
+A real-time vocal visualizer tuned for sustained legato styles
+(chanson, jazz vocal, contralto/mezzo — designed around Patricia Kaas).
 
-The system is NOT a generic particle visualizer.
-
-It is a **structured spatial representation of sound** with strict visual rules:
-
-* Pitch → vertical position
-* Loudness → horizontal/radial expansion (rings)
-
----
-
-# 🔴 Core Principle (Non-Negotiable)
-
-The visual must communicate:
-
-* WHERE the sound is → vertical (pitch)
-* HOW strong it is → horizontal spread (rings)
-
-If this mapping is not visually obvious, the implementation is incorrect.
+The **primary visual** is rendered natively in-app via
+`ui/renderer.py` (PySide6 `QOpenGLWidget` + raw OpenGL 3.3 core). A
+secondary browser-based view exists at `frontend/visualizer.html` and
+shares the same `LiveState` snapshot over WebSocket.
 
 ---
 
-# 🧱 Rendering Architecture
+# 🔴 Core Principle
 
-The scene must be built from explicit systems.
+The visual must communicate two things at a glance:
 
-## Allowed Systems
+1. **The melodic line** — pitch over the last ~6 seconds, scrolling
+   right-to-left. Vibrato must appear as natural undulation in the line.
+2. **The current voice character** — a plume anchored at the right
+   edge of the trail whose warmth, size, and drift reflect timbre,
+   loudness, and vocal stability *right now*.
 
-* BackgroundSystem
-* PitchBandSystem
-* RingSystem
-* AxisSystem (subtle reference only)
-* CameraSystem
-* (Later) AudioMappingSystem
-
-## Forbidden Systems (must NOT exist or render)
-
-* Spine mesh
-* Ribbon systems
-* Particle clouds
-* Nebula planes
-* Random noise fields
-* “Decorative” geometry not tied to data
-
-If any of the above appear, the result is invalid.
+If a viewer cannot read both at a glance, the implementation is wrong.
 
 ---
 
-# 🎯 Visual Composition Rules
+# 🧱 Visual Architecture: "Smoke & Filament"
 
-## 1. Scene Philosophy
+Three explicit drawing passes, in order:
 
-* Minimal
-* Structured
-* Cinematic
-* Data-driven
+1. **Background** — fullscreen quad. Midnight gradient + warm
+   stage-light glow from below-centre (chanson stage feel).
+2. **Filament** — scrolling pitch contour. A 2D triangle-strip ribbon
+   in world XY, built each paint from a client-side ring buffer of
+   pitch samples. Per-vertex colour + alpha. Additive blending.
+3. **Plume** — two billboards (halo behind, core in front) at the
+   right edge of the filament, anchored at the current note Y.
+   Multi-octave fbm noise + radial falloff in the fragment shader.
 
-NOT:
+## Forbidden
 
-* noisy
-* chaotic
-* effect-heavy
-* “cool demo”
-
----
-
-## 2. Background
-
-* Deep navy-black (NOT pure black)
-* Subtle gradient allowed
-* No visible textures or noise
+* Rings, tori, concentric pulses
+* Particle systems
+* Mel-spectrogram surface meshes
+* Bars / equalizer columns / VU meters
+* Decorative geometry not tied to data
 
 ---
 
-## 3. Pitch Bands (Vertical Structure)
+# 🎯 Data Mapping (Authoritative)
 
-* 6–8 horizontal zones
-* Soft transitions (no hard lines)
-* Very subtle visibility
-* Used as spatial reference only
+| Feature           | Source                          | Visual target                          |
+|-------------------|---------------------------------|----------------------------------------|
+| pitch (Hz, log)   | `state.pitch`, `pitchConf`      | Filament Y, plume Y                    |
+| loudness          | `state.loudness` (dB)           | Filament thickness, plume size         |
+| centroid          | `state.centroid` (Hz)           | Filament colour (per-sample), plume warmth |
+| stability         | smoothed `pitchConf`            | Plume drift (1−stability)              |
+| onset             | `state.onset` + `onsetHist`     | Plume inner-core flash                 |
+| voiced gate       | `pitch > 40 ∧ pitchConf > 0.10` | Filament alpha/thickness collapse      |
+| vibrato           | *emergent*                      | Natural undulation in the filament     |
 
-### Color progression (bottom → top):
-
-* Deep crimson / wine (low)
-* Burnt orange / amber (mid)
-* Gold / warm yellow (upper-mid)
-* Muted jade / cyan-blue (high)
-
-❗ Never use pure RGB colors or rainbow gradients
-
----
-
-## 4. Rings (Primary Visual Element)
-
-Rings represent loudness.
-
-### Behavior:
-
-* Position (Y) = pitch
-* Radius = loudness
-* Thickness = energy stability
-* Brightness = energy + onset
-
-### Appearance:
-
-* Not flat lines
-* Must have thickness and gradient profile
-
-Each ring must include:
-
-* Inner edge → brighter, sharper
-* Mid body → main color
-* Outer edge → soft fade
-
-### Shape:
-
-* Slight ellipse (perspective)
-* Subtle organic deformation allowed
-* NEVER perfect mathematically rigid circles
+**Vibrato is not a separate visual feature.** It emerges from the raw
+pitch sample stream. Do not add synthetic sinusoidal warps to fake it.
 
 ---
 
-## 5. Ring Motion (when enabled later)
+# 🎨 Colour System
 
-* Expand outward with easing (fast → slow)
-* Fade gradually (not abrupt)
-* Leave faint echo trail
+Chanson palette, six stops, chest → head:
 
----
+```
+0.00  deep wine        (0.46, 0.11, 0.13)
+0.22  burnt orange     (0.62, 0.22, 0.14)
+0.45  amber            (0.78, 0.46, 0.20)
+0.65  warm gold        (0.85, 0.66, 0.34)
+0.82  muted jade       (0.50, 0.56, 0.50)
+1.00  desaturated pewter (0.42, 0.54, 0.66)
+```
 
-## 6. Layering
+### Register pull
 
-Each sound event should produce:
+Colour is *not strictly* a function of pitch. The spectral centroid
+pulls the sampled colour toward the chest tint `(0.78, 0.38, 0.16)`
+when timbre is dark. This makes Kaas-style smoky chest delivery read
+as warm even at mid-pitch, and bright head-voice notes read as cool
+even when sung lower.
 
-* Main ring
-* Faint inner ring
-* Faint outer echo ring
-
-All slightly offset in time.
-
----
-
-## 7. Overlap Rules
-
-When multiple rings overlap:
-
-* Do NOT allow white blowout
-* Clamp brightness
-* Preserve readability
-
----
-
-## 8. Axis (Center)
-
-* Optional, very subtle
-* Must NOT look like a hard white line
-* Should feel like soft reference, not geometry
-
----
-
-## 9. Lighting & Bloom
-
-* Bloom must be minimal and controlled
-* Scene must look correct with bloom OFF
-* Bloom enhances — never defines the shape
-
----
-
-## 10. Negative Space
-
-Large empty space is REQUIRED.
-
-If the scene feels “full” → it is wrong.
-
----
-
-# 🎨 Color System (Critical)
-
-Avoid:
-
-* neon
-* pure red/green/blue
-* high saturation everywhere
-
-Prefer:
-
-* amber
-* gold
-* copper
-* jade
-* cyan-blue (desaturated)
-
-Use layered tones, not flat colors.
+Avoid: neon, pure RGB, rainbow cycling, high saturation everywhere.
 
 ---
 
 # ⚙️ Implementation Rules
 
-## 1. Always prefer clarity over complexity
+## 1. Public API
 
-If a feature reduces readability → remove it.
+`ui/renderer.py` must export:
 
----
+```python
+class RingWidget(QOpenGLWidget):
+    def __init__(self, live_state: LiveState, parent=None): ...
+```
 
-## 2. No legacy carryover
+The class name is retained for `main_window.py` compatibility even
+though the design is no longer rings.
 
-Do NOT reuse old systems (spine, ribbons, particles).
+Mouse: left-drag orbit, wheel zoom.
 
-Rebuild cleanly.
+## 2. Sample feed
 
----
+`LiveState` carries a monotonic `frame_id` (bumped on each
+`update_from_frame`, reset by `reset()`). The renderer reads it from
+`snapshot()["frameId"]` and appends a new sample to the filament ring
+buffer only when the id has advanced. This guarantees:
 
-## 3. Config-driven tuning required
+* one filament vertex per analysis frame (≈43 fps)
+* no duplicates if the renderer paints faster than the analyzer
+* clean reset on track change
 
-Expose these parameters:
+## 3. Per-frame work
 
-* ringThickness
-* ringGlow
-* ringOpacity
-* ringEchoCount
-* bandOpacity
-* axisOpacity
-* bloomStrength
-* cameraDistance
+* Background: one shader, two triangles, ~zero cost.
+* Filament rebuild: O(N) typed-array writes (N ≤ 360 samples). Single
+  glBufferSubData per attribute. Triangle list with pre-built index
+  buffer.
+* Plume: two quads with fragment shaders. No textures.
+* No allocations in `paintGL`. Reusable numpy buffers.
 
----
+## 4. Motion
 
-## 4. Static-first workflow
+* Pitch attack 0.45, release 0.08 — dramatic swells linger.
+* Plume size / drift / warmth smoothed at 0.10–0.18.
+* Filament itself is **not** smoothed — raw per-frame samples are the
+  point. Per-feature smoothing happens upstream.
 
-Every feature must:
+## 5. Voiced gating
 
-1. Look correct in a paused/static frame
-2. Only then be animated
-3. Only then be connected to audio
+The filament collapses width and alpha on unvoiced samples so silence
+between phrases reads as visibly *empty*, not a continuous solid line.
 
----
+## 6. Browser path
 
-## 5. No randomness without meaning
-
-All motion must relate to:
-
-* pitch
-* loudness
-* onset
-* vibrato
-
-No decorative randomness.
+`frontend/visualizer-engine.js` + `visualizer.html` consume the same
+`LiveState` snapshot via WebSocket. They are a **secondary view** kept
+for browser/remote use. Visual parity with the native renderer is
+desirable but not required; the native renderer is the canonical
+implementation.
 
 ---
 
@@ -256,73 +153,32 @@ No decorative randomness.
 
 Before completing any task, verify:
 
-* No forbidden systems are rendering
-* Rings are the dominant visual element
-* Pitch is readable vertically
-* Loudness is readable via ring size
-* No white blobs or overexposure
-* Scene looks clean when paused
-* Negative space is preserved
-
-If any check fails → implementation is incorrect.
-
----
-
-# 🚫 Common Failure Modes (Avoid)
-
-* Reintroducing particle systems
-* Adding glow to hide poor geometry
-* Overusing bloom
-* Making everything bright
-* Using rainbow gradients
-* Perfect geometric shapes with no life
-* Trying to make it “more impressive” instead of more readable
+* [ ] The pitch contour is readable as a scrolling line
+* [ ] Vibrato shows up as natural undulation when sustained vocal
+      audio with vibrato is played (e.g. a Kaas track)
+* [ ] The plume sits at the right edge and tracks the current note
+* [ ] Chest-voice notes are warm/amber; head-voice notes shift cooler
+* [ ] Unvoiced gaps produce visible empty regions in the trail
+* [ ] No white blowout on overlap (additive blend stays under control)
+* [ ] Negative space dominates — the scene is not "full"
+* [ ] `python app.py` still launches without import or shader errors
 
 ---
 
-# 🧭 Development Stages
+# 🚫 Failure Modes to Avoid
 
-## Stage 1
-
-Static scene:
-
-* pitch bands + rings only
-
-## Stage 2
-
-Ring quality:
-
-* thickness, gradients, layering
-
-## Stage 3
-
-Audio mapping:
-
-* pitch → Y
-* loudness → radius
-
-## Stage 4
-
-Motion polish:
-
-* easing, trails, stability
-
-## Stage 5
-
-Final polish:
-
-* color tuning
-* performance
-* UI refinement
+* Reintroducing rings, particles, or spine systems
+* Drawing the filament as a continuous solid line through silence
+* Synthetic vibrato warps in the shader (vibrato must emerge from
+  the sample stream itself)
+* Plume drifting in a direction unrelated to instability
+* Over-bright onset flashes that wash out the scene
+* Heavy CPU work or allocations in `paintGL`
 
 ---
 
-# 🧠 Guiding Principle
+# 🧭 Guiding Principle
 
-This is not a visual effect.
-
-This is a **visual instrument**.
-
-Every pixel must justify itself through meaning or refinement.
-
----
+This is a **visual instrument for listening to a singer**, not a
+generic music visualizer. Every pixel must justify itself through
+musical meaning.
