@@ -82,37 +82,138 @@ in  vec2 vUv;
 out vec4 fragColor;
 uniform float uAspect;       // width / height
 uniform float uTime;
+uniform float uYaw;          // camera yaw (radians) — drives subtle parallax
 
-// Cheap hash for film grain
+// Cheap hash for film grain & city light placement
 float hash21(vec2 p) {
     p = fract(p * vec2(443.897, 441.423));
     p += dot(p, p.yx + 19.19);
     return fract((p.x + p.y) * p.x);
 }
+float hash11(float n) {
+    return fract(sin(n) * 43758.5453);
+}
+
+// One soft warm pinprick of light at uv coordinate `c` with size `s`
+// and brightness `b`. Cheap gaussian + subtle outer halo.
+float lightPoint(vec2 uv, vec2 c, float s, float aspect) {
+    vec2 d = (uv - c) * vec2(aspect, 1.0);
+    float r = length(d) / s;
+    return exp(-r * r * 60.0) + exp(-r * r * 6.0) * 0.18;
+}
 
 void main() {
-    // Vertical sky gradient — midnight, slightly lifted in the middle
-    vec3 dark = vec3(0.008, 0.014, 0.024);
-    vec3 mid  = vec3(0.020, 0.030, 0.052);
-    vec3 sky  = mix(dark, mid, smoothstep(0.0, 0.7, vUv.y));
+    vec2 uv = vUv;                                 // 0..1
+    vec2 auv = vec2((uv.x - 0.5) * uAspect, uv.y); // aspect-corrected, x centered
 
-    // Stage glow from below-LEFT (warm ember) — kept clear of plume on right
-    vec2 p = vec2((vUv.x - 0.20) * uAspect, vUv.y - (-0.20));
-    float d = length(p) * 1.6;
-    float glow = exp(-d * 2.2) * 0.55;
-    glow *= smoothstep(0.50, 0.0, vUv.y);   // bottom-half only
-    glow *= smoothstep(1.05, 0.55, vUv.x);  // fade out toward right edge
+    // Tiny parallax offset for distant elements: when the camera yaws, the
+    // far layer shifts opposite, suggesting depth. Effect is intentionally
+    // tiny (~3% of view).
+    float par = uYaw * 0.020;
 
-    vec3 stage = vec3(0.42, 0.18, 0.10) * glow;
+    // ─────────────────────────────────────────────────────────────
+    // 1) SKY — vertical gradient. Slightly warmer near the horizon
+    //          (atmospheric scattering), cool blue-black at the top.
+    // ─────────────────────────────────────────────────────────────
+    vec3 zenith   = vec3(0.005, 0.010, 0.020);
+    vec3 upperMid = vec3(0.015, 0.025, 0.048);
+    vec3 lowerMid = vec3(0.040, 0.040, 0.058);
+    vec3 horizonC = vec3(0.085, 0.055, 0.055);
 
-    vec3 col = sky + stage;
+    vec3 sky;
+    if (uv.y > 0.55) {
+        sky = mix(upperMid, zenith, smoothstep(0.55, 1.0, uv.y));
+    } else if (uv.y > 0.32) {
+        sky = mix(lowerMid, upperMid, smoothstep(0.32, 0.55, uv.y));
+    } else {
+        sky = mix(horizonC, lowerMid, smoothstep(0.10, 0.32, uv.y));
+    }
 
-    // Film grain — temporally animated, subtle, slightly amplified in shadows
+    // ─────────────────────────────────────────────────────────────
+    // 2) MOON — large soft warm glow, upper-left, balances the halo
+    //           on the right. Parallaxes with camera.
+    // ─────────────────────────────────────────────────────────────
+    vec2 moonC = vec2((0.22 - par) - 0.5, 0.78);  // in auv frame
+    moonC.x *= uAspect;
+    vec2 moonD = auv - moonC;
+    float moonR = length(moonD);
+    float moonBody = exp(-moonR * moonR * 38.0);          // tight disc
+    float moonHalo = exp(-moonR * moonR * 2.2) * 0.35;    // wide aura
+    float moonFar  = exp(-moonR * moonR * 0.4) * 0.08;    // very wide bleed
+    vec3 moonCol   = vec3(0.92, 0.78, 0.55);
+    vec3 moon      = moonCol * (moonBody * 0.55 + moonHalo + moonFar);
+
+    // ─────────────────────────────────────────────────────────────
+    // 3) HORIZON BAND — warm haze concentrated near y ≈ 0.18,
+    //                   suggesting distant city glow on the horizon.
+    // ─────────────────────────────────────────────────────────────
+    float horizonY = 0.18;
+    float horizonBand = exp(-pow((uv.y - horizonY) * 7.0, 2.0));
+    // Stronger toward centre-left where city is densest
+    float horizonX = 1.0 - smoothstep(0.30, 1.10, abs(uv.x - 0.38));
+    vec3 horizonGlow = vec3(0.32, 0.18, 0.12) * horizonBand * horizonX * 0.85;
+
+    // ─────────────────────────────────────────────────────────────
+    // 4) ATMOSPHERIC HAZE — soft luminance lift in mid-screen,
+    //                       slow horizontal drift (wind).
+    // ─────────────────────────────────────────────────────────────
+    float hazeY = 0.30;
+    float hazeBand = exp(-pow((uv.y - hazeY) * 4.5, 2.0)) * 0.55;
+    float hazeDrift = sin(uv.x * 3.0 + uTime * 0.04) * 0.5 + 0.5;
+    hazeBand *= 0.6 + 0.4 * hazeDrift;
+    vec3 hazeCol = vec3(0.045, 0.035, 0.038);
+    vec3 haze    = hazeCol * hazeBand;
+
+    // ─────────────────────────────────────────────────────────────
+    // 5) CITY LIGHTS — scattered warm pinpricks along the horizon.
+    //    Each light is placed by a deterministic hash so positions
+    //    are stable, but each light shimmers (brightness flickers).
+    // ─────────────────────────────────────────────────────────────
+    vec3 lights = vec3(0.0);
+    const int N_LIGHTS = 32;
+    for (int i = 0; i < N_LIGHTS; i++) {
+        float fi = float(i);
+        // Deterministic position
+        float px = hash11(fi * 13.37) * 1.6 - 0.3;       // -0.3 .. 1.3 (extra spread)
+        float py = horizonY + (hash11(fi * 7.13) - 0.5) * 0.08;  // around horizonY
+        // Parallax shift (lights are "far") — slight, scale with horizontal distance
+        px -= par * 0.6;
+        // Shimmer — slow per-light brightness oscillation
+        float shimmer = 0.55 + 0.45 * sin(uTime * (0.8 + hash11(fi * 3.1) * 1.4)
+                                          + fi * 2.4);
+        // Some lights are warm amber, some cooler — city variety
+        float warmth = hash11(fi * 5.9);
+        vec3 lcol = mix(vec3(0.65, 0.42, 0.20),     // warm sodium
+                        vec3(0.85, 0.78, 0.62),     // pale yellow window
+                        warmth);
+        // Brightness varies — most dim, a few brighter
+        float lb = pow(hash11(fi * 1.7), 2.0) * 0.55 + 0.15;
+        float lp = lightPoint(uv, vec2(px, py), 0.011, uAspect);
+        lights += lcol * lp * lb * shimmer;
+    }
+    // Lights fade slightly above and below the horizon band
+    lights *= smoothstep(0.07, 0.18, uv.y) * (1.0 - smoothstep(0.20, 0.28, uv.y));
+
+    // ─────────────────────────────────────────────────────────────
+    // 6) STAGE EMBER — keep a faint warm glow at the very bottom,
+    //                  much subtler than before (folded into the
+    //                  larger atmosphere instead of competing).
+    // ─────────────────────────────────────────────────────────────
+    float floorGlow = smoothstep(0.18, 0.0, uv.y) * 0.55;
+    vec3 floorCol = vec3(0.18, 0.08, 0.05) * floorGlow;
+
+    // ─────────────────────────────────────────────────────────────
+    // COMPOSITE
+    // ─────────────────────────────────────────────────────────────
+    vec3 col = sky + haze + horizonGlow + moon + lights + floorCol;
+
+    // ─────────────────────────────────────────────────────────────
+    // FILM GRAIN — animated, biased toward shadows
+    // ─────────────────────────────────────────────────────────────
     float g = hash21(vUv * vec2(1920.0, 1080.0) + fract(uTime * 17.0));
-    float grain = (g - 0.5) * 0.028;
-    // Bias toward shadows (more grain where colour is darker — feels filmic)
-    float shadowLift = 1.0 - smoothstep(0.0, 0.15, length(col));
-    col += grain * (0.6 + 0.7 * shadowLift);
+    float grain = (g - 0.5) * 0.026;
+    float shadowLift = 1.0 - smoothstep(0.0, 0.18, length(col));
+    col += grain * (0.55 + 0.7 * shadowLift);
 
     fragColor = vec4(col, 1.0);
 }
@@ -194,90 +295,105 @@ out vec4 fragColor;
 uniform vec3  uColor;
 uniform vec3  uInner;
 uniform float uTime;
-uniform float uDrift;     // 0 still ↔ 1 turbulent
+uniform float uDrift;     // 0 still ↔ 1 turbulent (drives wobble amount)
 uniform float uFlash;     // onset core flash 0..1
 uniform float uWarm;      // 0 cool head ↔ 1 warm chest
 uniform float uOpacity;
-uniform float uShapeR;    // outer falloff radius (in uv units, ~1.0)
+uniform float uShapeR;    // visible halo radius (uv units of inner quad third)
 
-float hash(vec2 p) {
-    p = fract(p * vec2(123.34, 456.21));
-    p += dot(p, p + 45.32);
-    return fract(p.x * p.y);
-}
-float noise(vec2 p) {
-    vec2 i = floor(p), f = fract(p);
-    float a = hash(i);
-    float b = hash(i + vec2(1.0, 0.0));
-    float c = hash(i + vec2(0.0, 1.0));
-    float d = hash(i + vec2(1.0, 1.0));
-    vec2 u = f * f * (3.0 - 2.0 * f);
-    return mix(a, b, u.x) + (c - a) * u.y * (1.0 - u.x) + (d - b) * u.x * u.y;
-}
-float fbm(vec2 p) {
-    float v = 0.0, a = 0.5;
-    for (int i = 0; i < 4; i++) {
-        v += a * noise(p);
-        p *= 2.07;
-        a *= 0.5;
-    }
-    return v;
-}
+// "Breath halo" — a clean additive glow representing the singer's current
+// note. NOT smoke. NOT a sphere with a light behind it. Just light: a
+// gaussian core, a wider body, a faint outer aura, plus continuously
+// emitted soft outward pulses ("breaths") that give it life without
+// pretending to be a physical substance.
 
 void main() {
-    // Vertical elongation: smoke is taller than wide. We sample noise in a
-    // squished coordinate so wisps stretch vertically and the silhouette is
-    // not a symmetric blob.
     vec2 uv = vUv;
-    vec2 stretchUv = vec2(uv.x * 1.45, uv.y * 0.85);
 
-    // Slow upward breath drift + horizontal sway
-    vec2 nuv = stretchUv * 1.3;
-    nuv.y += uTime * 0.16;
-    nuv.x += sin(uTime * 0.35) * 0.18;
-    nuv += vec2(uTime * 0.05, uTime * 0.07) * uDrift;
+    // Slight vertical elongation — suggests an exhale rising, without
+    // committing to a flame metaphor. Tall:wide ≈ 1.18 : 1.
+    vec2 fuv = vec2(uv.x * 1.18, (uv.y - 0.04) * 0.86);
 
-    // Domain-warped fbm — fbm coordinates are perturbed by another fbm.
-    // This is the single biggest "smoke vs glow-ball" difference: warping
-    // creates curling wisps and tendrils instead of symmetric blobs.
-    vec2 q = vec2(fbm(nuv + vec2(0.0, 0.0)),
-                  fbm(nuv + vec2(5.2, 1.3)));
-    vec2 r2 = vec2(fbm(nuv + 3.5 * q + vec2(1.7, 9.2) + uTime * 0.04),
-                   fbm(nuv + 3.5 * q + vec2(8.3, 2.8) - uTime * 0.05));
-    float n = fbm(nuv + 4.0 * r2);
+    // Gentle horizontal wobble — proportional to instability. When the
+    // voice is steady the halo is still; when phonation is unstable it
+    // sways slightly. The wobble is on the SAMPLE coordinate so it
+    // looks like the halo itself breathing, not a translation.
+    float wob = sin(uTime * 1.4 + uv.y * 2.3) * 0.06 * uDrift;
+    fuv.x += wob;
 
-    // Stronger contrast on the noise so wisps are visible, not mush.
-    n = smoothstep(0.30, 0.85, n);
-    n = mix(0.45, n, 0.50 + uDrift * 0.50);
+    // Distance from centre in the elongated frame
+    float r = length(fuv) / max(0.4, uShapeR);
 
-    // Radial falloff — vertically elongated (smoke rises) and biased upward.
-    // We push the centre of the radial falloff slightly downward so density
-    // is asymmetric: more substance below, wispy tail above.
-    vec2 fuv = vec2(uv.x * 1.10, (uv.y + 0.08) * 0.78);
-    float r = length(fuv) / max(0.5, uShapeR);
-    float radial = exp(-r * r * 1.7);
+    // ── Layer 1: bright tight core (the "voice point")
+    float core = exp(-r * r * 9.0);
 
-    // Upward wispiness: extra density along an upward streak from centre
-    float upStreak = exp(-pow(uv.x, 2.0) * 4.0) *
-                     exp(-pow(max(0.0, -uv.y - 0.1), 2.0) * 1.8) *
-                     n * 0.55;
+    // ── Layer 2: body — the actual halo
+    float body = exp(-r * r * 2.4);
 
-    // Hard-clip at quad boundary regardless of noise
+    // ── Layer 3: soft outer aura
+    float aura = exp(-r * r * 0.85) * 0.45;
+
+    // ── Layer 4: outward-drifting "breath pulses" — continuous soft
+    // concentric waves emanating from the centre. This is what keeps the
+    // halo alive without resorting to noise textures.
+    //   waveSpeed: how fast pulses travel outward
+    //   waveSpacing: distance between pulse rings
+    //   waveSharp: how tight each pulse band is (lower = softer)
+    float waveSpeed   = 0.55;
+    float waveSpacing = 0.55;
+    float waveSharp   = 14.0;
+    float phase = r - uTime * waveSpeed;
+    // Three pulses, summed, each at different phase offsets
+    float pulses = 0.0;
+    for (int i = 0; i < 3; i++) {
+        float pp = phase - float(i) * waveSpacing;
+        pulses += exp(-pp * pp * waveSharp) * 0.45;
+    }
+    // Pulses are emitted from the centre and fade with r (more room far out
+    // but lower amplitude — keeps them subtle)
+    pulses *= exp(-r * r * 1.2) * (0.55 + uFlash * 0.7);
+    // Onset events nudge a fresh, brighter pulse (modulates the pulse amplitude)
+    pulses *= 1.0 + uFlash * 0.8;
+
+    // ── Combine layers
+    // Core dominates the centre; body fills the visible halo; aura softens
+    // the edge; pulses ride on top to give motion.
+    float dens = core * 0.9 + body * 0.55 + aura * 0.30 + pulses * 0.35;
+
+    // Hard edge kill so the quad boundary is never visible
     float edgeKill = smoothstep(1.0, 0.55, length(uv));
-    float dens = (radial * n + upStreak) * edgeKill;
+    dens *= edgeKill;
 
-    // Inner bright core — tighter, brighter
-    float core = exp(-r * r * 10.0);
-    float innerPulse = core * (0.45 + uFlash * 0.55);
+    // ── Colour: register-aware
+    // When uWarm is high (chest), body uses uColor (warm).
+    // When uWarm is low (head), shift body toward a desaturated cool tint.
+    vec3 coolBody = vec3(0.32, 0.42, 0.55);
+    vec3 bodyCol  = mix(coolBody * 0.85, uColor, uWarm);
 
-    // Cool tint when head voice (uWarm low)
-    vec3 cool  = vec3(0.32, 0.42, 0.55);
-    vec3 outer = mix(cool * 0.7, uColor, uWarm);
+    // Inner core glow — bright warm-ish, slightly modulated by warm/cool
+    vec3 coreCol = uInner;
 
-    vec3 col = mix(outer, uInner, innerPulse);
-    float a  = clamp(dens, 0.0, 1.0) * uOpacity * 0.62 + innerPulse * uOpacity * 0.42;
+    // Pulse colour: matches body but slightly brighter so pulses read as
+    // "light moving through the halo"
+    vec3 pulseCol = bodyCol * 1.15 + vec3(0.05, 0.03, 0.0);
 
+    // Onset flash brightens everything for a moment, with a warm cast
+    vec3 flashCol = mix(coreCol, vec3(1.0, 0.86, 0.62), 0.5);
+
+    // Final colour: weighted by per-layer contribution to dens
+    float coreW   = core  * 0.9;
+    float bodyW   = body  * 0.55;
+    float auraW   = aura  * 0.30;
+    float pulseW  = pulses * 0.35;
+    float totalW  = max(coreW + bodyW + auraW + pulseW, 1e-4);
+
+    vec3 col = (coreCol * coreW + bodyCol * (bodyW + auraW) + pulseCol * pulseW) / totalW;
+    col = mix(col, flashCol, uFlash * 0.35);
+
+    // ── Alpha
+    float a = clamp(dens, 0.0, 1.4) * uOpacity * 0.70;
     if (a < 0.002) discard;
+
     fragColor = vec4(col, a);
 }
 """
@@ -816,6 +932,7 @@ class RingWidget(QOpenGLWidget):
         GL.glUseProgram(self._bg_prog)
         GL.glUniform1f(_ul(self._bg_prog, "uAspect"), aspect)
         GL.glUniform1f(_ul(self._bg_prog, "uTime"),   t_world)
+        GL.glUniform1f(_ul(self._bg_prog, "uYaw"),    yaw)
         GL.glBindVertexArray(self._quad_vao)
         GL.glDrawArrays(GL.GL_TRIANGLES, 0, 6)
 
