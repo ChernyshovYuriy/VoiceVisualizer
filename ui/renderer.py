@@ -81,6 +81,15 @@ _BG_FRAG = """\
 in  vec2 vUv;
 out vec4 fragColor;
 uniform float uAspect;       // width / height
+uniform float uTime;
+
+// Cheap hash for film grain
+float hash21(vec2 p) {
+    p = fract(p * vec2(443.897, 441.423));
+    p += dot(p, p.yx + 19.19);
+    return fract((p.x + p.y) * p.x);
+}
+
 void main() {
     // Vertical sky gradient — midnight, slightly lifted in the middle
     vec3 dark = vec3(0.008, 0.014, 0.024);
@@ -96,34 +105,69 @@ void main() {
 
     vec3 stage = vec3(0.42, 0.18, 0.10) * glow;
 
-    fragColor = vec4(sky + stage, 1.0);
+    vec3 col = sky + stage;
+
+    // Film grain — temporally animated, subtle, slightly amplified in shadows
+    float g = hash21(vUv * vec2(1920.0, 1080.0) + fract(uTime * 17.0));
+    float grain = (g - 0.5) * 0.028;
+    // Bias toward shadows (more grain where colour is darker — feels filmic)
+    float shadowLift = 1.0 - smoothstep(0.0, 0.15, length(col));
+    col += grain * (0.6 + 0.7 * shadowLift);
+
+    fragColor = vec4(col, 1.0);
 }
 """
 
-# Filament: triangle strip in (x,y,z) world space + per-vertex colour + alpha.
+# Filament: triangle strip in (x,y,z) world space + per-vertex colour + alpha
+# + cross-ribbon coordinate (-1..1) for gaussian falloff across the ribbon width.
 _FIL_VERT = """\
 #version 330 core
 layout(location=0) in vec3 aPos;
 layout(location=1) in vec3 aCol;
 layout(location=2) in float aAlpha;
+layout(location=3) in float aCross;   // -1 (bottom edge) .. +1 (top edge)
 uniform mat4 uMVP;
 out vec3 vCol;
 out float vAlpha;
+out float vCross;
 void main() {
     vCol   = aCol;
     vAlpha = aAlpha;
+    vCross = aCross;
     gl_Position = uMVP * vec4(aPos, 1.0);
 }
 """
 
-_FIL_FRAG = """\
+# Core fragment: thin bright stroke with hard centerline.
+_FIL_FRAG_CORE = """\
 #version 330 core
 in vec3 vCol;
 in float vAlpha;
+in float vCross;
 out vec4 fragColor;
 void main() {
     if (vAlpha < 0.002) discard;
-    fragColor = vec4(vCol, vAlpha);
+    // Tight gaussian across the ribbon → bright thin line
+    float a = exp(-vCross * vCross * 3.5) * vAlpha;
+    fragColor = vec4(vCol, a);
+}
+"""
+
+# Halo fragment: wide soft bloom around the line — this is what makes it
+# read as glowing light instead of a flat stroke.
+_FIL_FRAG_HALO = """\
+#version 330 core
+in vec3 vCol;
+in float vAlpha;
+in float vCross;
+out vec4 fragColor;
+void main() {
+    if (vAlpha < 0.002) discard;
+    // Loose gaussian → wide soft bloom
+    float a = exp(-vCross * vCross * 0.9) * vAlpha * 0.55;
+    // Halo colour is warm-shifted and slightly desaturated toward orange
+    vec3 c = mix(vCol, vec3(0.85, 0.45, 0.20), 0.20) * 0.85;
+    fragColor = vec4(c, a);
 }
 """
 
@@ -181,23 +225,46 @@ float fbm(vec2 p) {
 }
 
 void main() {
+    // Vertical elongation: smoke is taller than wide. We sample noise in a
+    // squished coordinate so wisps stretch vertically and the silhouette is
+    // not a symmetric blob.
     vec2 uv = vUv;
+    vec2 stretchUv = vec2(uv.x * 1.45, uv.y * 0.85);
 
-    // Slow upward breath drift + horizontal sway (visible motion even when steady)
-    vec2 nuv = uv * 1.4;
-    nuv.y += uTime * 0.12;
+    // Slow upward breath drift + horizontal sway
+    vec2 nuv = stretchUv * 1.3;
+    nuv.y += uTime * 0.16;
     nuv.x += sin(uTime * 0.35) * 0.18;
     nuv += vec2(uTime * 0.05, uTime * 0.07) * uDrift;
 
-    float n = fbm(nuv);
-    n = mix(0.55, n, 0.55 + uDrift * 0.45);
+    // Domain-warped fbm — fbm coordinates are perturbed by another fbm.
+    // This is the single biggest "smoke vs glow-ball" difference: warping
+    // creates curling wisps and tendrils instead of symmetric blobs.
+    vec2 q = vec2(fbm(nuv + vec2(0.0, 0.0)),
+                  fbm(nuv + vec2(5.2, 1.3)));
+    vec2 r2 = vec2(fbm(nuv + 3.5 * q + vec2(1.7, 9.2) + uTime * 0.04),
+                   fbm(nuv + 3.5 * q + vec2(8.3, 2.8) - uTime * 0.05));
+    float n = fbm(nuv + 4.0 * r2);
 
-    // Radial falloff — soft, then hard-clipped at quad boundary so the
-    // mesh edge is never visible regardless of noise term.
-    float r = length(uv) / max(0.5, uShapeR);
+    // Stronger contrast on the noise so wisps are visible, not mush.
+    n = smoothstep(0.30, 0.85, n);
+    n = mix(0.45, n, 0.50 + uDrift * 0.50);
+
+    // Radial falloff — vertically elongated (smoke rises) and biased upward.
+    // We push the centre of the radial falloff slightly downward so density
+    // is asymmetric: more substance below, wispy tail above.
+    vec2 fuv = vec2(uv.x * 1.10, (uv.y + 0.08) * 0.78);
+    float r = length(fuv) / max(0.5, uShapeR);
     float radial = exp(-r * r * 1.7);
-    float edgeKill = smoothstep(1.0, 0.55, length(uv));  // zero past r=1
-    float dens = radial * mix(0.55, 1.0, n) * edgeKill;
+
+    // Upward wispiness: extra density along an upward streak from centre
+    float upStreak = exp(-pow(uv.x, 2.0) * 4.0) *
+                     exp(-pow(max(0.0, -uv.y - 0.1), 2.0) * 1.8) *
+                     n * 0.55;
+
+    // Hard-clip at quad boundary regardless of noise
+    float edgeKill = smoothstep(1.0, 0.55, length(uv));
+    float dens = (radial * n + upStreak) * edgeKill;
 
     // Inner bright core — tighter, brighter
     float core = exp(-r * r * 10.0);
@@ -208,7 +275,7 @@ void main() {
     vec3 outer = mix(cool * 0.7, uColor, uWarm);
 
     vec3 col = mix(outer, uInner, innerPulse);
-    float a  = dens * uOpacity * 0.65 + innerPulse * uOpacity * 0.40;
+    float a  = clamp(dens, 0.0, 1.0) * uOpacity * 0.62 + innerPulse * uOpacity * 0.42;
 
     if (a < 0.002) discard;
     fragColor = vec4(col, a);
@@ -335,6 +402,11 @@ class _Filament:
         self._pos   = np.zeros(nverts * 3, dtype=np.float32)
         self._col   = np.zeros(nverts * 3, dtype=np.float32)
         self._alpha = np.zeros(nverts,     dtype=np.float32)
+        # Per-vertex cross-ribbon coordinate: -1 for bottom, +1 for top.
+        # Static across frames, so set once.
+        self._cross = np.empty(nverts, dtype=np.float32)
+        self._cross[0::2] = 1.0    # top vertex of each pair
+        self._cross[1::2] = -1.0   # bottom vertex of each pair
 
         # Index buffer — strip-like triangulation
         nsegs = capacity - 1
@@ -346,7 +418,7 @@ class _Filament:
         self._idx_cpu = idx
 
         # GL handles — created in init_gl()
-        self.vao = self.vbo_pos = self.vbo_col = self.vbo_a = self.ebo = 0
+        self.vao = self.vbo_pos = self.vbo_col = self.vbo_a = self.vbo_x = self.ebo = 0
 
     # ---- GL lifecycle ------------------------------------------------------
 
@@ -371,6 +443,14 @@ class _Filament:
         GL.glBufferData(GL.GL_ARRAY_BUFFER, self._alpha.nbytes, None, GL.GL_DYNAMIC_DRAW)
         GL.glEnableVertexAttribArray(2)
         GL.glVertexAttribPointer(2, 1, GL.GL_FLOAT, False, 0, None)
+
+        # Cross-ribbon coordinate — static, uploaded once
+        self.vbo_x = GL.glGenBuffers(1)
+        GL.glBindBuffer(GL.GL_ARRAY_BUFFER, self.vbo_x)
+        GL.glBufferData(GL.GL_ARRAY_BUFFER, self._cross.nbytes,
+                        self._cross, GL.GL_STATIC_DRAW)
+        GL.glEnableVertexAttribArray(3)
+        GL.glVertexAttribPointer(3, 1, GL.GL_FLOAT, False, 0, None)
 
         self.ebo = GL.glGenBuffers(1)
         GL.glBindBuffer(GL.GL_ELEMENT_ARRAY_BUFFER, self.ebo)
@@ -420,8 +500,15 @@ class _Filament:
 
     # ---- per-frame geometry rebuild ---------------------------------------
 
-    def build_and_upload(self, t_now: float) -> int:
-        """Returns number of indices to draw (0 if nothing)."""
+    def build_and_upload(self, t_now: float, spill: float = 0.0,
+                         spill_col: tuple = (1.0, 0.7, 0.4)) -> int:
+        """Returns number of indices to draw (0 if nothing).
+
+        spill: 0..1 brightness of light spill from the plume onto the
+               rightmost trail samples. Affects roughly the last 20% of
+               the trail.
+        spill_col: warm tint of the spill.
+        """
         buf = self._buf
         n = len(buf)
         if n < 2:
@@ -453,11 +540,33 @@ class _Filament:
         # When the singer holds a perfectly steady note the deviation is zero
         # and no wiggle is added.
         ys = [items[start + i][1] for i in range(used)]
+        voiceds = [items[start + i][6] > 0.5 for i in range(used)]
         win = 5
         smoothed = [0.0] * used
         for i in range(used):
             lo = max(0, i - win); hi = min(used, i + win + 1)
             smoothed[i] = sum(ys[lo:hi]) / (hi - lo)
+
+        # Jump-gap weights: when consecutive samples have a large Y gap or
+        # cross a voiced↔unvoiced boundary, fade the alpha at that sample
+        # toward zero so the ribbon visibly *breaks* instead of drawing a
+        # vertical zig-zag. Eye reads breaks as phrasing, zig-zags as bugs.
+        JUMP_THRESHOLD = 0.55   # world units of Y change to consider a jump
+        gap_w = [1.0] * used
+        for i in range(used):
+            d_prev = abs(ys[i] - ys[i - 1]) if i > 0 else 0.0
+            d_next = abs(ys[i + 1] - ys[i]) if i < used - 1 else 0.0
+            d = max(d_prev, d_next)
+            if d > JUMP_THRESHOLD:
+                # smooth fade: zero at d=1.2, full at d=0.55
+                gap_w[i] = max(0.0, 1.0 - (d - JUMP_THRESHOLD) / 0.65)
+            # Also fade samples that border an unvoiced neighbour
+            if i > 0 and voiceds[i] != voiceds[i - 1]:
+                gap_w[i] *= 0.35
+            if i < used - 1 and voiceds[i] != voiceds[i + 1]:
+                gap_w[i] *= 0.35
+
+        sr, sg, sb = spill_col
 
         for i in range(used):
             t, y, thick, r, g, b, voiced = items[start + i]
@@ -487,13 +596,26 @@ class _Filament:
 
             # Brighten the leading 8% of the trail
             head_boost = 1.0 + pow(_clamp((tfrac - 0.92) / 0.08, 0.0, 1.0), 1.2) * 0.55
-            cr = min(r * head_boost, 1.4)
-            cg = min(g * head_boost, 1.4)
-            cb = min(b * head_boost, 1.4)
+            cr = r * head_boost
+            cg = g * head_boost
+            cb = b * head_boost
+
+            # Light spill from the plume — brightens roughly the last 20% of
+            # the trail, tinted toward the plume's warm core. Strongest at
+            # the head and falls off quickly going left.
+            if spill > 0.001:
+                spill_w = pow(_clamp((tfrac - 0.78) / 0.22, 0.0, 1.0), 1.4) * spill
+                cr += sr * spill_w * 0.45
+                cg += sg * spill_w * 0.45
+                cb += sb * spill_w * 0.45
+
+            cr = min(cr, 1.5)
+            cg = min(cg, 1.5)
+            cb = min(cb, 1.5)
             col[o*3+0]   = cr; col[o*3+1]   = cg; col[o*3+2]   = cb
             col[(o+1)*3+0] = cr; col[(o+1)*3+1] = cg; col[(o+1)*3+2] = cb
 
-            av = (0.95 if voiced > 0.5 else 0.10) * age_fade
+            av = (0.95 if voiced > 0.5 else 0.10) * age_fade * gap_w[i]
             a[o]   = av
             a[o+1] = av
 
@@ -634,7 +756,8 @@ class RingWidget(QOpenGLWidget):
     def initializeGL(self):
         try:
             self._bg_prog    = _program(_BG_VERT,    _BG_FRAG)
-            self._fil_prog   = _program(_FIL_VERT,   _FIL_FRAG)
+            self._fil_core   = _program(_FIL_VERT,   _FIL_FRAG_CORE)
+            self._fil_halo   = _program(_FIL_VERT,   _FIL_FRAG_HALO)
             self._plume_prog = _program(_PLUME_VERT, _PLUME_FRAG)
 
             self._quad_vao = _make_quad_vao()
@@ -692,20 +815,11 @@ class RingWidget(QOpenGLWidget):
         GL.glClear(GL.GL_COLOR_BUFFER_BIT | GL.GL_DEPTH_BUFFER_BIT)
         GL.glUseProgram(self._bg_prog)
         GL.glUniform1f(_ul(self._bg_prog, "uAspect"), aspect)
+        GL.glUniform1f(_ul(self._bg_prog, "uTime"),   t_world)
         GL.glBindVertexArray(self._quad_vao)
         GL.glDrawArrays(GL.GL_TRIANGLES, 0, 6)
 
-        # ── Filament — additive blending, no depth test
-        GL.glBlendFunc(GL.GL_SRC_ALPHA, GL.GL_ONE)
-        idx_count = self._fil.build_and_upload(t_world)
-        if idx_count > 0:
-            GL.glUseProgram(self._fil_prog)
-            GL.glUniformMatrix4fv(_ul(self._fil_prog, "uMVP"), 1, True, VP.flatten())
-            GL.glBindVertexArray(self._fil.vao)
-            GL.glDrawElements(GL.GL_TRIANGLES, idx_count, GL.GL_UNSIGNED_INT, None)
-
-        # ── Plume — two billboards (halo then core)
-        # Smooth plume params
+        # ── Smooth plume state FIRST (filament needs current spill colour)
         active = lv["active"]
         target_size = (PLUME_BASE_R + lv["loud"] * (PLUME_MAX_R - PLUME_BASE_R)) if active else 0.45
         target_drift = (1.0 - lv["stab"]) if active else 0.8
@@ -732,6 +846,28 @@ class RingWidget(QOpenGLWidget):
 
         plume_y = self._sm.dy
         opacity = 0.95 if active else 0.25
+
+        # ── Filament — build with light spill from plume, then two-pass draw
+        GL.glBlendFunc(GL.GL_SRC_ALPHA, GL.GL_ONE)
+
+        # Spill intensity: scaled by loudness × warmth × active, smoothed via
+        # the same plume state we just updated.
+        spill = 0.0
+        if active:
+            spill = _clamp(lv["loud"] * (0.55 + 0.45 * self._plume_warm), 0.0, 1.0)
+        idx_count = self._fil.build_and_upload(
+            t_world, spill=spill, spill_col=self._plume_inner)
+
+        if idx_count > 0:
+            GL.glBindVertexArray(self._fil.vao)
+            # Halo pass first (wider soft bloom)
+            GL.glUseProgram(self._fil_halo)
+            GL.glUniformMatrix4fv(_ul(self._fil_halo, "uMVP"), 1, True, VP.flatten())
+            GL.glDrawElements(GL.GL_TRIANGLES, idx_count, GL.GL_UNSIGNED_INT, None)
+            # Core pass — bright tight line on top
+            GL.glUseProgram(self._fil_core)
+            GL.glUniformMatrix4fv(_ul(self._fil_core, "uMVP"), 1, True, VP.flatten())
+            GL.glDrawElements(GL.GL_TRIANGLES, idx_count, GL.GL_UNSIGNED_INT, None)
 
         GL.glUseProgram(self._plume_prog)
         GL.glUniformMatrix4fv(_ul(self._plume_prog, "uMVP"), 1, True, VP.flatten())
