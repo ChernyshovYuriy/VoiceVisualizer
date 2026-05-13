@@ -38,14 +38,18 @@ if TYPE_CHECKING:
 TRAIL_SECONDS    = 6.0
 TRAIL_MAX_POINTS = 360            # ring buffer cap
 
-X_LEFT, X_RIGHT  = -7.0,  6.0     # filament spans this X range
+X_LEFT, X_RIGHT  = -8.4,  7.2     # filament spans this X range — wider
 Y_MIN,  Y_MAX    = -3.6,  3.6     # pitch field
 
-FILAMENT_BASE_W  = 0.020
-FILAMENT_MAX_W   = 0.070
+FILAMENT_BASE_W  = 0.045
+FILAMENT_MAX_W   = 0.220
+# Vibrato amplification — per-sample perpendicular wiggle proportional to
+# pitch derivative. Honest amplification of existing modulation; zero when
+# pitch is steady.
+FILAMENT_WIGGLE_GAIN = 0.32
 
-PLUME_BASE_R     = 0.55
-PLUME_MAX_R      = 1.85
+PLUME_BASE_R     = 0.70
+PLUME_MAX_R      = 2.10
 
 # Chanson palette — chest (warm/dark) to head (cool/bright)
 PALETTE = [
@@ -83,11 +87,12 @@ void main() {
     vec3 mid  = vec3(0.020, 0.030, 0.052);
     vec3 sky  = mix(dark, mid, smoothstep(0.0, 0.7, vUv.y));
 
-    // Stage glow from below-centre (warm ember)
-    vec2 p = vec2((vUv.x - 0.5) * uAspect, vUv.y - (-0.15));
-    float d = length(p) * 1.4;
-    float glow = exp(-d * 2.0) * 0.65;
-    glow *= smoothstep(0.55, 0.0, vUv.y);   // bottom-half only
+    // Stage glow from below-LEFT (warm ember) — kept clear of plume on right
+    vec2 p = vec2((vUv.x - 0.20) * uAspect, vUv.y - (-0.20));
+    float d = length(p) * 1.6;
+    float glow = exp(-d * 2.2) * 0.55;
+    glow *= smoothstep(0.50, 0.0, vUv.y);   // bottom-half only
+    glow *= smoothstep(1.05, 0.55, vUv.x);  // fade out toward right edge
 
     vec3 stage = vec3(0.42, 0.18, 0.10) * glow;
 
@@ -178,29 +183,32 @@ float fbm(vec2 p) {
 void main() {
     vec2 uv = vUv;
 
-    // Slow upward breath drift; turbulence scales with uDrift
+    // Slow upward breath drift + horizontal sway (visible motion even when steady)
     vec2 nuv = uv * 1.4;
-    nuv.y += uTime * 0.10;
-    nuv += vec2(uTime * 0.03, uTime * 0.05) * uDrift;
+    nuv.y += uTime * 0.12;
+    nuv.x += sin(uTime * 0.35) * 0.18;
+    nuv += vec2(uTime * 0.05, uTime * 0.07) * uDrift;
 
     float n = fbm(nuv);
-    n = mix(0.5, n, 0.6 + uDrift * 0.4);
+    n = mix(0.55, n, 0.55 + uDrift * 0.45);
 
-    // Radial falloff
+    // Radial falloff — soft, then hard-clipped at quad boundary so the
+    // mesh edge is never visible regardless of noise term.
     float r = length(uv) / max(0.5, uShapeR);
-    float radial = exp(-r * r * 1.6);
-    float dens   = radial * mix(0.55, 1.0, n);
+    float radial = exp(-r * r * 1.7);
+    float edgeKill = smoothstep(1.0, 0.55, length(uv));  // zero past r=1
+    float dens = radial * mix(0.55, 1.0, n) * edgeKill;
 
-    // Inner bright core
-    float core = exp(-r * r * 8.0);
-    float innerPulse = core * (0.55 + uFlash * 0.45);
+    // Inner bright core — tighter, brighter
+    float core = exp(-r * r * 10.0);
+    float innerPulse = core * (0.45 + uFlash * 0.55);
 
     // Cool tint when head voice (uWarm low)
     vec3 cool  = vec3(0.32, 0.42, 0.55);
     vec3 outer = mix(cool * 0.7, uColor, uWarm);
 
     vec3 col = mix(outer, uInner, innerPulse);
-    float a  = dens * uOpacity * 0.55 + innerPulse * uOpacity * 0.35;
+    float a  = dens * uOpacity * 0.65 + innerPulse * uOpacity * 0.40;
 
     if (a < 0.002) discard;
     fragColor = vec4(col, a);
@@ -386,14 +394,23 @@ class _Filament:
 
         loud  = float(snap.get("loudness", -80.0))
         cent  = float(snap.get("centroid", 900.0))
-        loud_n = _clamp((loud + 58.0) / 38.0, 0.0, 1.0)
+        # Sensitive in -45..-15 dB range typical of preprocessed vocal stems
+        loud_n = _clamp((loud + 45.0) / 30.0, 0.0, 1.0)
+        # Mild perceptual curve so louds don't saturate too fast
+        loud_n = pow(loud_n, 0.85)
         cent_n = _clamp((cent - 250.0) / 3600.0, 0.0, 1.0)
 
-        # Sample colour: pitch palette pulled toward chest tint when dark
+        # Sample colour: pitch palette pulled toward chest tint when dark.
+        # Reduced pull strength (was 0.55*0.55=~0.30; now ~0.18) so the
+        # full chest→head palette is visibly traversed.
         pn   = _hz_norm(pitch if voiced else 220.0)
         pcol = _palette(pn)
-        chest_pull = (1.0 - cent_n) * 0.55
-        col = _lp3(pcol, CHEST_TINT, chest_pull * 0.55)
+        chest_pull = (1.0 - cent_n) * 0.30
+        col = _lp3(pcol, CHEST_TINT, chest_pull)
+        # Slight saturation lift so amber doesn't read as brown on-screen
+        col = (min(col[0] * 1.08, 1.0),
+               min(col[1] * 1.02, 1.0),
+               min(col[2] * 0.98, 1.0))
 
         # Thickness from loudness
         thick = FILAMENT_BASE_W + (FILAMENT_MAX_W - FILAMENT_BASE_W) * loud_n
@@ -430,10 +447,28 @@ class _Filament:
 
         pos = self._pos; col = self._col; a = self._alpha
 
+        # Pre-compute a smoothed Y track so we can extract the per-sample
+        # deviation (= vibrato component) and amplify it visually. This is
+        # honest amplification of existing modulation: amp ∝ (y - smoothed_y).
+        # When the singer holds a perfectly steady note the deviation is zero
+        # and no wiggle is added.
+        ys = [items[start + i][1] for i in range(used)]
+        win = 5
+        smoothed = [0.0] * used
+        for i in range(used):
+            lo = max(0, i - win); hi = min(used, i + win + 1)
+            smoothed[i] = sum(ys[lo:hi]) / (hi - lo)
+
         for i in range(used):
             t, y, thick, r, g, b, voiced = items[start + i]
             tfrac = (t - t_old) / t_span         # 0 oldest .. 1 newest
             x = X_LEFT + (X_RIGHT - X_LEFT) * tfrac
+
+            # Vibrato amplification: deviation from local mean, gained up.
+            # Bounded so wide pitch leaps don't get exploded.
+            dev = y - smoothed[i]
+            dev = max(-0.35, min(0.35, dev))
+            y_vis = y + dev * FILAMENT_WIGGLE_GAIN * (1.0 if voiced > 0.5 else 0.0)
 
             # Age weighting: thicker/brighter near "now"
             age_fade  = pow(tfrac, 0.55)
@@ -442,8 +477,8 @@ class _Filament:
             vw = 1.0 if voiced > 0.5 else 0.12
             half = 0.5 * thick * vw * age_fade * (0.4 + 0.6 * head_fade)
 
-            top_y = y + half
-            bot_y = y - half
+            top_y = y_vis + half
+            bot_y = y_vis - half
 
             o = i * 2
             # vertices: top, bottom
@@ -564,10 +599,10 @@ class RingWidget(QOpenGLWidget):
         self._plume_color = (0.78, 0.46, 0.20)
         self._plume_inner = (0.95, 0.78, 0.55)
 
-        # Camera orbit — start gently angled
-        self._yaw   = 0.0
-        self._pitch = 6.0
-        self._dist  = 11.0
+        # Camera orbit — gentle stage perspective, closer in
+        self._yaw   = -4.0     # tiny side angle for depth
+        self._pitch = 3.0
+        self._dist  = 9.0
         self._mp: QPoint | None = None
 
         # Wall-clock timeline for the filament
@@ -702,26 +737,26 @@ class RingWidget(QOpenGLWidget):
         GL.glUniformMatrix4fv(_ul(self._plume_prog, "uMVP"), 1, True, VP.flatten())
         GL.glBindVertexArray(self._quad_vao)
 
-        # Halo (larger, dimmer, behind)
-        halo_size = self._plume_size * 1.55
-        halo_col  = (self._plume_color[0] * 0.55,
-                     self._plume_color[1] * 0.42,
-                     self._plume_color[2] * 0.32)
+        # Halo (larger, dimmer, behind) — quad oversized 3x so edge is invisible
+        halo_size = self._plume_size * 1.65
+        halo_col  = (self._plume_color[0] * 0.50,
+                     self._plume_color[1] * 0.38,
+                     self._plume_color[2] * 0.28)
         GL.glUniform3f(_ul(self._plume_prog, "uCenter"), X_RIGHT, plume_y, -0.05)
-        GL.glUniform1f(_ul(self._plume_prog, "uScale"),  halo_size)
+        GL.glUniform1f(_ul(self._plume_prog, "uScale"),  halo_size * 3.0)
         GL.glUniform3f(_ul(self._plume_prog, "uColor"),  *halo_col)
         GL.glUniform3f(_ul(self._plume_prog, "uInner"),  *self._plume_inner)
         GL.glUniform1f(_ul(self._plume_prog, "uTime"),   t_world)
         GL.glUniform1f(_ul(self._plume_prog, "uDrift"),  self._plume_drift)
         GL.glUniform1f(_ul(self._plume_prog, "uFlash"),  0.0)
         GL.glUniform1f(_ul(self._plume_prog, "uWarm"),   self._plume_warm)
-        GL.glUniform1f(_ul(self._plume_prog, "uOpacity"), opacity * 0.50)
-        GL.glUniform1f(_ul(self._plume_prog, "uShapeR"), 1.0)
+        GL.glUniform1f(_ul(self._plume_prog, "uOpacity"), opacity * 0.32)
+        GL.glUniform1f(_ul(self._plume_prog, "uShapeR"), 1.0 / 3.0)
         GL.glDrawArrays(GL.GL_TRIANGLES, 0, 6)
 
-        # Core
+        # Core — same trick: quad 3x visible radius, falloff compressed to inner third
         GL.glUniform3f(_ul(self._plume_prog, "uCenter"), X_RIGHT, plume_y, 0.01)
-        GL.glUniform1f(_ul(self._plume_prog, "uScale"),  self._plume_size)
+        GL.glUniform1f(_ul(self._plume_prog, "uScale"),  self._plume_size * 3.0)
         GL.glUniform3f(_ul(self._plume_prog, "uColor"),  *self._plume_color)
         GL.glUniform3f(_ul(self._plume_prog, "uInner"),  *self._plume_inner)
         GL.glUniform1f(_ul(self._plume_prog, "uTime"),   t_world)
@@ -729,7 +764,7 @@ class RingWidget(QOpenGLWidget):
         GL.glUniform1f(_ul(self._plume_prog, "uFlash"),  self._plume_flash)
         GL.glUniform1f(_ul(self._plume_prog, "uWarm"),   self._plume_warm)
         GL.glUniform1f(_ul(self._plume_prog, "uOpacity"), opacity)
-        GL.glUniform1f(_ul(self._plume_prog, "uShapeR"), 1.0)
+        GL.glUniform1f(_ul(self._plume_prog, "uShapeR"), 1.0 / 3.0)
         GL.glDrawArrays(GL.GL_TRIANGLES, 0, 6)
 
         GL.glBindVertexArray(0)
